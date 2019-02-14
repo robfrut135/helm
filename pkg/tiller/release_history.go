@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -25,6 +25,12 @@ import (
 
 // GetHistory gets the history for a given release.
 func (s *ReleaseServer) GetHistory(ctx context.Context, req *tpb.GetHistoryRequest) (*tpb.GetHistoryResponse, error) {
+	if err := validateReleaseName(req.Name); err != nil {
+		s.Log("getHistory: Release name is invalid: %s", req.Name)
+		return nil, err
+	}
+
+	s.Log("getting history for release %s", req.Name)
 	h, err := s.env.Releases.History(req.Name)
 	if err != nil {
 		return nil, err

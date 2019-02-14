@@ -92,7 +92,8 @@ There are three potential sources of values:
 
 - A chart's `values.yaml` file
 - A values file supplied by `helm install -f` or `helm upgrade -f`
-- The values passed to a `--set` flag on `helm install` or `helm upgrade`
+- The values passed to a `--set` or `--set-string` flag on `helm install` or `helm upgrade`
+- The content of a file passed to `--set-file` flag on `helm install` or `helm upgrade`
 
 When designing the structure of your values, keep in mind that users of your
 chart may want to override them via either the `-f` flag or with the `--set`
@@ -113,6 +114,11 @@ servers:
     port: 81
 ```
 
+The above cannot be expressed with `--set` in Helm `<=2.4`. In Helm 2.5, the
+accessing the port on foo is `--set servers[0].port=80`. Not only is it harder
+for the user to figure out, but it is prone to errors if at some later time the
+order of the `servers` is changed.
+
 Easy to use:
 
 ```yaml
@@ -122,6 +128,8 @@ servers:
   bar:
     port: 81
 ```
+
+Accessing foo's port is much more obvious: `--set servers.foo.port=80`.
 
 ## Document 'values.yaml'
 

@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,11 +21,12 @@ import (
 	"io"
 	"io/ioutil"
 	"net"
+	"net/http"
 	"strconv"
 
-	"k8s.io/kubernetes/pkg/client/restclient"
-	"k8s.io/kubernetes/pkg/client/unversioned/portforward"
-	"k8s.io/kubernetes/pkg/client/unversioned/remotecommand"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/portforward"
+	"k8s.io/client-go/transport/spdy"
 )
 
 // Tunnel describes a ssh-like tunnel to a kubernetes pod
@@ -37,12 +38,12 @@ type Tunnel struct {
 	Out       io.Writer
 	stopChan  chan struct{}
 	readyChan chan struct{}
-	config    *restclient.Config
-	client    restclient.Interface
+	config    *rest.Config
+	client    rest.Interface
 }
 
 // NewTunnel creates a new tunnel
-func NewTunnel(client restclient.Interface, config *restclient.Config, namespace, podName string, remote int) *Tunnel {
+func NewTunnel(client rest.Interface, config *rest.Config, namespace, podName string, remote int) *Tunnel {
 	return &Tunnel{
 		config:    config,
 		client:    client,
@@ -58,7 +59,6 @@ func NewTunnel(client restclient.Interface, config *restclient.Config, namespace
 // Close disconnects a tunnel connection
 func (t *Tunnel) Close() {
 	close(t.stopChan)
-	close(t.readyChan)
 }
 
 // ForwardPort opens a tunnel to a kubernetes pod
@@ -71,10 +71,11 @@ func (t *Tunnel) ForwardPort() error {
 		Name(t.PodName).
 		SubResource("portforward").URL()
 
-	dialer, err := remotecommand.NewExecutor(t.config, "POST", u)
+	transport, upgrader, err := spdy.RoundTripperFor(t.config)
 	if err != nil {
 		return err
 	}
+	dialer := spdy.NewDialer(upgrader, &http.Client{Transport: transport}, "POST", u)
 
 	local, err := getAvailablePort()
 	if err != nil {

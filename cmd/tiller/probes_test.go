@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -40,5 +40,19 @@ func TestProbesServer(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET /liveness returned status code %d, expected %d", resp.StatusCode, http.StatusOK)
+	}
+}
+
+func TestPrometheus(t *testing.T) {
+	mux := http.NewServeMux()
+	addPrometheusHandler(mux)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/metrics")
+	if err != nil {
+		t.Fatalf("GET /metrics returned an error (%s)", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /metrics returned status code %d, expected %d", resp.StatusCode, http.StatusOK)
 	}
 }

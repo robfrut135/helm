@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -21,6 +21,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"k8s.io/helm/pkg/downloader"
+	"k8s.io/helm/pkg/getter"
 	"k8s.io/helm/pkg/helm/helmpath"
 )
 
@@ -51,9 +52,7 @@ type dependencyUpdateCmd struct {
 
 // newDependencyUpdateCmd creates a new dependency update command.
 func newDependencyUpdateCmd(out io.Writer) *cobra.Command {
-	duc := &dependencyUpdateCmd{
-		out: out,
-	}
+	duc := &dependencyUpdateCmd{out: out}
 
 	cmd := &cobra.Command{
 		Use:     "update [flags] CHART",
@@ -72,7 +71,7 @@ func newDependencyUpdateCmd(out io.Writer) *cobra.Command {
 				return err
 			}
 
-			duc.helmhome = helmpath.Home(homePath())
+			duc.helmhome = settings.Home
 
 			return duc.run()
 		},
@@ -94,11 +93,12 @@ func (d *dependencyUpdateCmd) run() error {
 		HelmHome:   d.helmhome,
 		Keyring:    d.keyring,
 		SkipUpdate: d.skipRefresh,
+		Getters:    getter.All(settings),
 	}
 	if d.verify {
-		man.Verify = downloader.VerifyIfPossible
+		man.Verify = downloader.VerifyAlways
 	}
-	if flagDebug {
+	if settings.Debug {
 		man.Debug = true
 	}
 	return man.Update()

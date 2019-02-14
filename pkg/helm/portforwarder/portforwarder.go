@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,29 +19,34 @@ package portforwarder
 import (
 	"fmt"
 
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
-	"k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/core/internalversion"
-	"k8s.io/kubernetes/pkg/client/restclient"
-	"k8s.io/kubernetes/pkg/labels"
+	"k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/client-go/kubernetes"
+	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
+	"k8s.io/client-go/rest"
 
 	"k8s.io/helm/pkg/kube"
 )
 
+var (
+	tillerPodLabels = labels.Set{"app": "helm", "name": "tiller"}
+)
+
 // New creates a new and initialized tunnel.
-func New(namespace string, client *internalclientset.Clientset, config *restclient.Config) (*kube.Tunnel, error) {
-	podName, err := getTillerPodName(client.Core(), namespace)
+func New(namespace string, client kubernetes.Interface, config *rest.Config) (*kube.Tunnel, error) {
+	podName, err := GetTillerPodName(client.CoreV1(), namespace)
 	if err != nil {
 		return nil, err
 	}
 	const tillerPort = 44134
-	t := kube.NewTunnel(client.Core().RESTClient(), config, namespace, podName, tillerPort)
+	t := kube.NewTunnel(client.CoreV1().RESTClient(), config, namespace, podName, tillerPort)
 	return t, t.ForwardPort()
 }
 
-func getTillerPodName(client internalversion.PodsGetter, namespace string) (string, error) {
-	// TODO use a const for labels
-	selector := labels.Set{"app": "helm", "name": "tiller"}.AsSelector()
+// GetTillerPodName fetches the name of tiller pod running in the given namespace.
+func GetTillerPodName(client corev1.PodsGetter, namespace string) (string, error) {
+	selector := tillerPodLabels.AsSelector()
 	pod, err := getFirstRunningPod(client, namespace, selector)
 	if err != nil {
 		return "", err
@@ -49,8 +54,23 @@ func getTillerPodName(client internalversion.PodsGetter, namespace string) (stri
 	return pod.ObjectMeta.GetName(), nil
 }
 
-func getFirstRunningPod(client internalversion.PodsGetter, namespace string, selector labels.Selector) (*api.Pod, error) {
-	options := api.ListOptions{LabelSelector: selector}
+// GetTillerPodImage fetches the image of tiller pod running in the given namespace.
+func GetTillerPodImage(client corev1.PodsGetter, namespace string) (string, error) {
+	selector := tillerPodLabels.AsSelector()
+	pod, err := getFirstRunningPod(client, namespace, selector)
+	if err != nil {
+		return "", err
+	}
+	for _, c := range pod.Spec.Containers {
+		if c.Name == "tiller" {
+			return c.Image, nil
+		}
+	}
+	return "", fmt.Errorf("could not find a tiller pod")
+}
+
+func getFirstRunningPod(client corev1.PodsGetter, namespace string, selector labels.Selector) (*v1.Pod, error) {
+	options := metav1.ListOptions{LabelSelector: selector.String()}
 	pods, err := client.Pods(namespace).List(options)
 	if err != nil {
 		return nil, err
@@ -59,7 +79,7 @@ func getFirstRunningPod(client internalversion.PodsGetter, namespace string, sel
 		return nil, fmt.Errorf("could not find tiller")
 	}
 	for _, p := range pods.Items {
-		if api.IsPodReady(&p) {
+		if isPodReady(&p) {
 			return &p, nil
 		}
 	}

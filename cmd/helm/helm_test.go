@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,211 +21,46 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"math/rand"
 	"os"
+	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 
-	"github.com/golang/protobuf/ptypes/timestamp"
 	"github.com/spf13/cobra"
 
+	"k8s.io/client-go/util/homedir"
 	"k8s.io/helm/pkg/helm"
+	"k8s.io/helm/pkg/helm/environment"
 	"k8s.io/helm/pkg/helm/helmpath"
-	"k8s.io/helm/pkg/proto/hapi/chart"
 	"k8s.io/helm/pkg/proto/hapi/release"
-	rls "k8s.io/helm/pkg/proto/hapi/services"
-	"k8s.io/helm/pkg/proto/hapi/version"
 	"k8s.io/helm/pkg/repo"
 )
 
-var mockHookTemplate = `apiVersion: v1
-kind: Job
-metadata:
-  annotations:
-    "helm.sh/hooks": pre-install
-`
-
-var mockManifest = `apiVersion: v1
-kind: Secret
-metadata:
-  name: fixture
-`
-
-type releaseOptions struct {
-	name       string
-	version    int32
-	chart      *chart.Chart
-	statusCode release.Status_Code
-	namespace  string
-}
-
-func releaseMock(opts *releaseOptions) *release.Release {
-	date := timestamp.Timestamp{Seconds: 242085845, Nanos: 0}
-
-	name := opts.name
-	if name == "" {
-		name = "testrelease-" + string(rand.Intn(100))
-	}
-
-	var version int32 = 1
-	if opts.version != 0 {
-		version = opts.version
-	}
-
-	namespace := opts.namespace
-	if namespace == "" {
-		namespace = "default"
-	}
-
-	ch := opts.chart
-	if opts.chart == nil {
-		ch = &chart.Chart{
-			Metadata: &chart.Metadata{
-				Name:    "foo",
-				Version: "0.1.0-beta.1",
-			},
-			Templates: []*chart.Template{
-				{Name: "templates/foo.tpl", Data: []byte(mockManifest)},
-			},
-		}
-	}
-
-	scode := release.Status_DEPLOYED
-	if opts.statusCode > 0 {
-		scode = opts.statusCode
-	}
-
-	return &release.Release{
-		Name: name,
-		Info: &release.Info{
-			FirstDeployed: &date,
-			LastDeployed:  &date,
-			Status:        &release.Status{Code: scode},
-			Description:   "Release mock",
-		},
-		Chart:     ch,
-		Config:    &chart.Config{Raw: `name: "value"`},
-		Version:   version,
-		Namespace: namespace,
-		Hooks: []*release.Hook{
-			{
-				Name:     "pre-install-hook",
-				Kind:     "Job",
-				Path:     "pre-install-hook.yaml",
-				Manifest: mockHookTemplate,
-				LastRun:  &date,
-				Events:   []release.Hook_Event{release.Hook_PRE_INSTALL},
-			},
-		},
-		Manifest: mockManifest,
-	}
-}
-
-type fakeReleaseClient struct {
-	rels []*release.Release
-	err  error
-}
-
-var _ helm.Interface = &fakeReleaseClient{}
-var _ helm.Interface = &helm.Client{}
-
-func (c *fakeReleaseClient) ListReleases(opts ...helm.ReleaseListOption) (*rls.ListReleasesResponse, error) {
-	resp := &rls.ListReleasesResponse{
-		Count:    int64(len(c.rels)),
-		Releases: c.rels,
-	}
-	return resp, c.err
-}
-
-func (c *fakeReleaseClient) InstallRelease(chStr, ns string, opts ...helm.InstallOption) (*rls.InstallReleaseResponse, error) {
-	return &rls.InstallReleaseResponse{
-		Release: c.rels[0],
-	}, nil
-}
-
-func (c *fakeReleaseClient) InstallReleaseFromChart(chart *chart.Chart, ns string, opts ...helm.InstallOption) (*rls.InstallReleaseResponse, error) {
-	return &rls.InstallReleaseResponse{
-		Release: c.rels[0],
-	}, nil
-}
-
-func (c *fakeReleaseClient) DeleteRelease(rlsName string, opts ...helm.DeleteOption) (*rls.UninstallReleaseResponse, error) {
-	return nil, nil
-}
-
-func (c *fakeReleaseClient) ReleaseStatus(rlsName string, opts ...helm.StatusOption) (*rls.GetReleaseStatusResponse, error) {
-	if c.rels[0] != nil {
-		return &rls.GetReleaseStatusResponse{
-			Name:      c.rels[0].Name,
-			Info:      c.rels[0].Info,
-			Namespace: c.rels[0].Namespace,
-		}, nil
-	}
-	return nil, fmt.Errorf("No such release: %s", rlsName)
-}
-
-func (c *fakeReleaseClient) GetVersion(opts ...helm.VersionOption) (*rls.GetVersionResponse, error) {
-	return &rls.GetVersionResponse{
-		Version: &version.Version{
-			SemVer: "1.2.3-fakeclient+testonly",
-		},
-	}, nil
-}
-
-func (c *fakeReleaseClient) UpdateRelease(rlsName string, chStr string, opts ...helm.UpdateOption) (*rls.UpdateReleaseResponse, error) {
-	return nil, nil
-}
-
-func (c *fakeReleaseClient) UpdateReleaseFromChart(rlsName string, chart *chart.Chart, opts ...helm.UpdateOption) (*rls.UpdateReleaseResponse, error) {
-	return nil, nil
-}
-
-func (c *fakeReleaseClient) RollbackRelease(rlsName string, opts ...helm.RollbackOption) (*rls.RollbackReleaseResponse, error) {
-	return nil, nil
-}
-
-func (c *fakeReleaseClient) ReleaseContent(rlsName string, opts ...helm.ContentOption) (resp *rls.GetReleaseContentResponse, err error) {
-	if len(c.rels) > 0 {
-		resp = &rls.GetReleaseContentResponse{
-			Release: c.rels[0],
-		}
-	}
-	return resp, c.err
-}
-
-func (c *fakeReleaseClient) ReleaseHistory(rlsName string, opts ...helm.HistoryOption) (*rls.GetHistoryResponse, error) {
-	return &rls.GetHistoryResponse{Releases: c.rels}, c.err
-}
-
-func (c *fakeReleaseClient) RunReleaseTest(rlsName string, opts ...helm.ReleaseTestOption) (<-chan *rls.TestReleaseResponse, <-chan error) {
-	return nil, nil
-}
-
-func (c *fakeReleaseClient) Option(opt ...helm.Option) helm.Interface {
-	return c
-}
-
-// releaseCmd is a command that works with a fakeReleaseClient
-type releaseCmd func(c *fakeReleaseClient, out io.Writer) *cobra.Command
+// releaseCmd is a command that works with a FakeClient
+type releaseCmd func(c *helm.FakeClient, out io.Writer) *cobra.Command
 
 // runReleaseCases runs a set of release cases through the given releaseCmd.
 func runReleaseCases(t *testing.T, tests []releaseCase, rcmd releaseCmd) {
 	var buf bytes.Buffer
 	for _, tt := range tests {
-		c := &fakeReleaseClient{
-			rels: []*release.Release{tt.resp},
-		}
-		cmd := rcmd(c, &buf)
-		cmd.ParseFlags(tt.flags)
-		err := cmd.RunE(cmd, tt.args)
-		if (err != nil) != tt.err {
-			t.Errorf("%q. expected error, got '%v'", tt.name, err)
-		}
-		re := regexp.MustCompile(tt.expected)
-		if !re.Match(buf.Bytes()) {
-			t.Errorf("%q. expected\n%q\ngot\n%q", tt.name, tt.expected, buf.String())
-		}
-		buf.Reset()
+		t.Run(tt.name, func(t *testing.T) {
+			c := &helm.FakeClient{
+				Rels:      tt.rels,
+				Responses: tt.responses,
+			}
+			cmd := rcmd(c, &buf)
+			cmd.ParseFlags(tt.flags)
+			err := cmd.RunE(cmd, tt.args)
+			if (err != nil) != tt.err {
+				t.Errorf("expected error, got '%v'", err)
+			}
+			re := regexp.MustCompile(tt.expected)
+			if !re.Match(buf.Bytes()) {
+				t.Errorf("expected\n%q\ngot\n%q", tt.expected, buf.String())
+			}
+			buf.Reset()
+		})
 	}
 }
 
@@ -238,25 +73,28 @@ type releaseCase struct {
 	expected string
 	err      bool
 	resp     *release.Release
+	// Rels are the available releases at the start of the test.
+	rels      []*release.Release
+	responses map[string]release.TestRun_Status
 }
 
 // tempHelmHome sets up a Helm Home in a temp dir.
 //
 // This does not clean up the directory. You must do that yourself.
 // You  must also set helmHome yourself.
-func tempHelmHome(t *testing.T) (string, error) {
-	oldhome := helmHome
+func tempHelmHome(t *testing.T) (helmpath.Home, error) {
+	oldhome := settings.Home
 	dir, err := ioutil.TempDir("", "helm_home-")
 	if err != nil {
-		return "n/", err
+		return helmpath.Home("n/"), err
 	}
 
-	helmHome = dir
-	if err := ensureTestHome(helmpath.Home(helmHome), t); err != nil {
-		return "n/", err
+	settings.Home = helmpath.Home(dir)
+	if err := ensureTestHome(settings.Home, t); err != nil {
+		return helmpath.Home("n/"), err
 	}
-	helmHome = oldhome
-	return dir, nil
+	settings.Home = oldhome
+	return helmpath.Home(dir), nil
 }
 
 // ensureTestHome creates a home directory like ensureHome, but without remote references.
@@ -299,7 +137,7 @@ func ensureTestHome(home helmpath.Home, t *testing.T) error {
 		}
 	}
 
-	localRepoIndexFile := home.LocalRepository(localRepoIndexFilePath)
+	localRepoIndexFile := home.LocalRepository(localRepositoryIndexFile)
 	if fi, err := os.Stat(localRepoIndexFile); err != nil {
 		i := repo.NewIndexFile()
 		if err := i.WriteFile(localRepoIndexFile, 0644); err != nil {
@@ -312,6 +150,404 @@ func ensureTestHome(home helmpath.Home, t *testing.T) error {
 		return fmt.Errorf("%s must be a file, not a directory", localRepoIndexFile)
 	}
 
-	t.Logf("$HELM_HOME has been configured at %s.\n", helmHome)
+	t.Logf("$HELM_HOME has been configured at %s.\n", settings.Home.String())
 	return nil
+
+}
+
+func TestRootCmd(t *testing.T) {
+	cleanup := resetEnv()
+	defer cleanup()
+
+	tests := []struct {
+		name   string
+		args   []string
+		envars map[string]string
+		home   string
+	}{
+		{
+			name: "defaults",
+			args: []string{"home"},
+			home: filepath.Join(homedir.HomeDir(), ".helm"),
+		},
+		{
+			name: "with --home set",
+			args: []string{"--home", "/foo"},
+			home: "/foo",
+		},
+		{
+			name: "subcommands with --home set",
+			args: []string{"home", "--home", "/foo"},
+			home: "/foo",
+		},
+		{
+			name:   "with $HELM_HOME set",
+			args:   []string{"home"},
+			envars: map[string]string{"HELM_HOME": "/bar"},
+			home:   "/bar",
+		},
+		{
+			name:   "subcommands with $HELM_HOME set",
+			args:   []string{"home"},
+			envars: map[string]string{"HELM_HOME": "/bar"},
+			home:   "/bar",
+		},
+		{
+			name:   "with $HELM_HOME and --home set",
+			args:   []string{"home", "--home", "/foo"},
+			envars: map[string]string{"HELM_HOME": "/bar"},
+			home:   "/foo",
+		},
+	}
+
+	// ensure not set locally
+	os.Unsetenv("HELM_HOME")
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer os.Unsetenv("HELM_HOME")
+
+			for k, v := range tt.envars {
+				os.Setenv(k, v)
+			}
+
+			cmd := newRootCmd(tt.args)
+			cmd.SetOutput(ioutil.Discard)
+			cmd.SetArgs(tt.args)
+			cmd.Run = func(*cobra.Command, []string) {}
+			if err := cmd.Execute(); err != nil {
+				t.Errorf("unexpected error: %s", err)
+			}
+
+			if settings.Home.String() != tt.home {
+				t.Errorf("expected home %q, got %q", tt.home, settings.Home)
+			}
+			homeFlag := cmd.Flag("home").Value.String()
+			homeFlag = os.ExpandEnv(homeFlag)
+			if homeFlag != tt.home {
+				t.Errorf("expected home %q, got %q", tt.home, homeFlag)
+			}
+		})
+	}
+}
+
+func TestTLSFlags(t *testing.T) {
+	cleanup := resetEnv()
+	defer cleanup()
+
+	homePath := os.Getenv("HELM_HOME")
+	if homePath == "" {
+		homePath = filepath.Join(homedir.HomeDir(), ".helm")
+	}
+
+	home := helmpath.Home(homePath)
+
+	tests := []struct {
+		name     string
+		args     []string
+		envars   map[string]string
+		settings environment.EnvSettings
+	}{
+		{
+			name: "defaults",
+			args: []string{"version", "-c"},
+			settings: environment.EnvSettings{
+				TillerHost:              "",
+				TillerConnectionTimeout: 300,
+				TillerNamespace:         "kube-system",
+				Home:                    home,
+				Debug:                   false,
+				KubeContext:             "",
+				KubeConfig:              "",
+				TLSEnable:               false,
+				TLSVerify:               false,
+				TLSServerName:           "",
+				TLSCaCertFile:           home.TLSCaCert(),
+				TLSCertFile:             home.TLSCert(),
+				TLSKeyFile:              home.TLSKey(),
+			},
+		},
+		{
+			name: "tls enable",
+			args: []string{"version", "-c", "--tls"},
+			settings: environment.EnvSettings{
+				TillerHost:              "",
+				TillerConnectionTimeout: 300,
+				TillerNamespace:         "kube-system",
+				Home:                    home,
+				Debug:                   false,
+				KubeContext:             "",
+				KubeConfig:              "",
+				TLSEnable:               true,
+				TLSVerify:               false,
+				TLSServerName:           "",
+				TLSCaCertFile:           home.TLSCaCert(),
+				TLSCertFile:             home.TLSCert(),
+				TLSKeyFile:              home.TLSKey(),
+			},
+		},
+		{
+			name: "tls verify",
+			args: []string{"version", "-c", "--tls-verify"},
+			settings: environment.EnvSettings{
+				TillerHost:              "",
+				TillerConnectionTimeout: 300,
+				TillerNamespace:         "kube-system",
+				Home:                    home,
+				Debug:                   false,
+				KubeContext:             "",
+				KubeConfig:              "",
+				TLSEnable:               false,
+				TLSVerify:               true,
+				TLSServerName:           "",
+				TLSCaCertFile:           home.TLSCaCert(),
+				TLSCertFile:             home.TLSCert(),
+				TLSKeyFile:              home.TLSKey(),
+			},
+		},
+		{
+			name: "tls servername",
+			args: []string{"version", "-c", "--tls-hostname=foo"},
+			settings: environment.EnvSettings{
+				TillerHost:              "",
+				TillerConnectionTimeout: 300,
+				TillerNamespace:         "kube-system",
+				Home:                    home,
+				Debug:                   false,
+				KubeContext:             "",
+				KubeConfig:              "",
+				TLSEnable:               false,
+				TLSVerify:               false,
+				TLSServerName:           "foo",
+				TLSCaCertFile:           home.TLSCaCert(),
+				TLSCertFile:             home.TLSCert(),
+				TLSKeyFile:              home.TLSKey(),
+			},
+		},
+		{
+			name: "tls cacert",
+			args: []string{"version", "-c", "--tls-ca-cert=/foo"},
+			settings: environment.EnvSettings{
+				TillerHost:              "",
+				TillerConnectionTimeout: 300,
+				TillerNamespace:         "kube-system",
+				Home:                    home,
+				Debug:                   false,
+				KubeContext:             "",
+				KubeConfig:              "",
+				TLSEnable:               false,
+				TLSVerify:               false,
+				TLSServerName:           "",
+				TLSCaCertFile:           "/foo",
+				TLSCertFile:             home.TLSCert(),
+				TLSKeyFile:              home.TLSKey(),
+			},
+		},
+		{
+			name: "tls cert",
+			args: []string{"version", "-c", "--tls-cert=/foo"},
+			settings: environment.EnvSettings{
+				TillerHost:              "",
+				TillerConnectionTimeout: 300,
+				TillerNamespace:         "kube-system",
+				Home:                    home,
+				Debug:                   false,
+				KubeContext:             "",
+				KubeConfig:              "",
+				TLSEnable:               false,
+				TLSVerify:               false,
+				TLSServerName:           "",
+				TLSCaCertFile:           home.TLSCaCert(),
+				TLSCertFile:             "/foo",
+				TLSKeyFile:              home.TLSKey(),
+			},
+		},
+		{
+			name: "tls key",
+			args: []string{"version", "-c", "--tls-key=/foo"},
+			settings: environment.EnvSettings{
+				TillerHost:              "",
+				TillerConnectionTimeout: 300,
+				TillerNamespace:         "kube-system",
+				Home:                    home,
+				Debug:                   false,
+				KubeContext:             "",
+				KubeConfig:              "",
+				TLSEnable:               false,
+				TLSVerify:               false,
+				TLSServerName:           "",
+				TLSCaCertFile:           home.TLSCaCert(),
+				TLSCertFile:             home.TLSCert(),
+				TLSKeyFile:              "/foo",
+			},
+		},
+		{
+			name:   "tls enable envvar",
+			args:   []string{"version", "-c"},
+			envars: map[string]string{"HELM_TLS_ENABLE": "true"},
+			settings: environment.EnvSettings{
+				TillerHost:              "",
+				TillerConnectionTimeout: 300,
+				TillerNamespace:         "kube-system",
+				Home:                    home,
+				Debug:                   false,
+				KubeContext:             "",
+				KubeConfig:              "",
+				TLSEnable:               true,
+				TLSVerify:               false,
+				TLSServerName:           "",
+				TLSCaCertFile:           home.TLSCaCert(),
+				TLSCertFile:             home.TLSCert(),
+				TLSKeyFile:              home.TLSKey(),
+			},
+		},
+		{
+			name:   "tls verify envvar",
+			args:   []string{"version", "-c"},
+			envars: map[string]string{"HELM_TLS_VERIFY": "true"},
+			settings: environment.EnvSettings{
+				TillerHost:              "",
+				TillerConnectionTimeout: 300,
+				TillerNamespace:         "kube-system",
+				Home:                    home,
+				Debug:                   false,
+				KubeContext:             "",
+				KubeConfig:              "",
+				TLSEnable:               false,
+				TLSVerify:               true,
+				TLSServerName:           "",
+				TLSCaCertFile:           home.TLSCaCert(),
+				TLSCertFile:             home.TLSCert(),
+				TLSKeyFile:              home.TLSKey(),
+			},
+		},
+		{
+			name:   "tls servername envvar",
+			args:   []string{"version", "-c"},
+			envars: map[string]string{"HELM_TLS_HOSTNAME": "foo"},
+			settings: environment.EnvSettings{
+				TillerHost:              "",
+				TillerConnectionTimeout: 300,
+				TillerNamespace:         "kube-system",
+				Home:                    home,
+				Debug:                   false,
+				KubeContext:             "",
+				KubeConfig:              "",
+				TLSEnable:               false,
+				TLSVerify:               false,
+				TLSServerName:           "foo",
+				TLSCaCertFile:           home.TLSCaCert(),
+				TLSCertFile:             home.TLSCert(),
+				TLSKeyFile:              home.TLSKey(),
+			},
+		},
+		{
+			name:   "tls cacert envvar",
+			args:   []string{"version", "-c"},
+			envars: map[string]string{"HELM_TLS_CA_CERT": "/foo"},
+			settings: environment.EnvSettings{
+				TillerHost:              "",
+				TillerConnectionTimeout: 300,
+				TillerNamespace:         "kube-system",
+				Home:                    home,
+				Debug:                   false,
+				KubeContext:             "",
+				KubeConfig:              "",
+				TLSEnable:               false,
+				TLSVerify:               false,
+				TLSServerName:           "",
+				TLSCaCertFile:           "/foo",
+				TLSCertFile:             home.TLSCert(),
+				TLSKeyFile:              home.TLSKey(),
+			},
+		},
+		{
+			name:   "tls cert envvar",
+			args:   []string{"version", "-c"},
+			envars: map[string]string{"HELM_TLS_CERT": "/foo"},
+			settings: environment.EnvSettings{
+				TillerHost:              "",
+				TillerConnectionTimeout: 300,
+				TillerNamespace:         "kube-system",
+				Home:                    home,
+				Debug:                   false,
+				KubeContext:             "",
+				KubeConfig:              "",
+				TLSEnable:               false,
+				TLSVerify:               false,
+				TLSServerName:           "",
+				TLSCaCertFile:           home.TLSCaCert(),
+				TLSCertFile:             "/foo",
+				TLSKeyFile:              home.TLSKey(),
+			},
+		},
+		{
+			name:   "tls key envvar",
+			args:   []string{"version", "-c"},
+			envars: map[string]string{"HELM_TLS_KEY": "/foo"},
+			settings: environment.EnvSettings{
+				TillerHost:              "",
+				TillerConnectionTimeout: 300,
+				TillerNamespace:         "kube-system",
+				Home:                    home,
+				Debug:                   false,
+				KubeContext:             "",
+				KubeConfig:              "",
+				TLSEnable:               false,
+				TLSVerify:               false,
+				TLSServerName:           "",
+				TLSCaCertFile:           home.TLSCaCert(),
+				TLSCertFile:             home.TLSCert(),
+				TLSKeyFile:              "/foo",
+			},
+		},
+	}
+
+	// ensure not set locally
+	tlsEnvvars := []string{
+		"HELM_TLS_HOSTNAME",
+		"HELM_TLS_CA_CERT",
+		"HELM_TLS_CERT",
+		"HELM_TLS_KEY",
+		"HELM_TLS_VERIFY",
+		"HELM_TLS_ENABLE",
+	}
+
+	for i := range tlsEnvvars {
+		os.Unsetenv(tlsEnvvars[i])
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+
+			for k, v := range tt.envars {
+				os.Setenv(k, v)
+				defer os.Unsetenv(k)
+			}
+
+			cmd := newRootCmd(tt.args)
+			cmd.SetOutput(ioutil.Discard)
+			cmd.SetArgs(tt.args)
+			cmd.Run = func(*cobra.Command, []string) {}
+			if err := cmd.Execute(); err != nil {
+				t.Errorf("unexpected error: %s", err)
+			}
+
+			if settings != tt.settings {
+				t.Errorf("expected settings %v, got %v", tt.settings, settings)
+			}
+		})
+	}
+}
+
+func resetEnv() func() {
+	origSettings := settings
+	origEnv := os.Environ()
+	return func() {
+		settings = origSettings
+		for _, pair := range origEnv {
+			kv := strings.SplitN(pair, "=", 2)
+			os.Setenv(kv[0], kv[1])
+		}
+	}
 }

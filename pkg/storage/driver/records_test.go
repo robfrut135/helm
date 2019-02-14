@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -73,15 +73,40 @@ func TestRecordsRemove(t *testing.T) {
 		newRecord("rls-a.v2", releaseStub("rls-a", 2, "default", rspb.Status_DEPLOYED)),
 	})
 
+	startLen := rs.Len()
+
 	for _, tt := range tests {
 		if r := rs.Remove(tt.key); r == nil {
 			if !tt.ok {
-				t.Fatalf("Failed to %q (key = %s). Expected nil, got %s",
+				t.Fatalf("Failed to %q (key = %s). Expected nil, got %v",
 					tt.desc,
 					tt.key,
 					r,
 				)
 			}
 		}
+	}
+
+	// We expect the total number of records will be less now than there were
+	// when we started.
+	endLen := rs.Len()
+	if endLen >= startLen {
+		t.Errorf("expected ending length %d to be less than starting length %d", endLen, startLen)
+	}
+}
+
+func TestRecordsRemoveAt(t *testing.T) {
+	rs := records([]*record{
+		newRecord("rls-a.v1", releaseStub("rls-a", 1, "default", rspb.Status_SUPERSEDED)),
+		newRecord("rls-a.v2", releaseStub("rls-a", 2, "default", rspb.Status_DEPLOYED)),
+	})
+
+	if len(rs) != 2 {
+		t.Fatal("Expected len=2 for mock")
+	}
+
+	rs.Remove("rls-a.v1")
+	if len(rs) != 1 {
+		t.Fatalf("Expected length of rs to be 1, got %d", len(rs))
 	}
 }

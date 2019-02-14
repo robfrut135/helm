@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,7 +19,6 @@ package repo
 import (
 	"io/ioutil"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -43,7 +42,10 @@ func TestRepositoryServer(t *testing.T) {
 	}
 
 	s := &RepositoryServer{RepoPath: "testdata/server"}
-	srv := httptest.NewServer(s)
+	srv, err := startLocalServerForTests(s)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer srv.Close()
 
 	for _, tt := range tests {

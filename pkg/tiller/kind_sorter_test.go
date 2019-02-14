@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,121 +24,118 @@ import (
 )
 
 func TestKindSorter(t *testing.T) {
-	manifests := []manifest{
+	manifests := []Manifest{
 		{
-			name:    "i",
-			content: "",
-			head:    &util.SimpleHead{Kind: "ClusterRole"},
+			Name: "i",
+			Head: &util.SimpleHead{Kind: "ClusterRole"},
 		},
 		{
-			name:    "j",
-			content: "",
-			head:    &util.SimpleHead{Kind: "ClusterRoleBinding"},
+			Name: "j",
+			Head: &util.SimpleHead{Kind: "ClusterRoleBinding"},
 		},
 		{
-			name:    "e",
-			content: "",
-			head:    &util.SimpleHead{Kind: "ConfigMap"},
+			Name: "e",
+			Head: &util.SimpleHead{Kind: "ConfigMap"},
 		},
 		{
-			name:    "u",
-			content: "",
-			head:    &util.SimpleHead{Kind: "CronJob"},
+			Name: "u",
+			Head: &util.SimpleHead{Kind: "CronJob"},
 		},
 		{
-			name:    "n",
-			content: "",
-			head:    &util.SimpleHead{Kind: "DaemonSet"},
+			Name: "2",
+			Head: &util.SimpleHead{Kind: "CustomResourceDefinition"},
 		},
 		{
-			name:    "r",
-			content: "",
-			head:    &util.SimpleHead{Kind: "Deployment"},
+			Name: "n",
+			Head: &util.SimpleHead{Kind: "DaemonSet"},
 		},
 		{
-			name:    "!",
-			content: "",
-			head:    &util.SimpleHead{Kind: "HonkyTonkSet"},
+			Name: "r",
+			Head: &util.SimpleHead{Kind: "Deployment"},
 		},
 		{
-			name:    "v",
-			content: "",
-			head:    &util.SimpleHead{Kind: "Ingress"},
+			Name: "!",
+			Head: &util.SimpleHead{Kind: "HonkyTonkSet"},
 		},
 		{
-			name:    "t",
-			content: "",
-			head:    &util.SimpleHead{Kind: "Job"},
+			Name: "v",
+			Head: &util.SimpleHead{Kind: "Ingress"},
 		},
 		{
-			name:    "c",
-			content: "",
-			head:    &util.SimpleHead{Kind: "LimitRange"},
+			Name: "t",
+			Head: &util.SimpleHead{Kind: "Job"},
 		},
 		{
-			name:    "a",
-			content: "",
-			head:    &util.SimpleHead{Kind: "Namespace"},
+			Name: "c",
+			Head: &util.SimpleHead{Kind: "LimitRange"},
 		},
 		{
-			name:    "f",
-			content: "",
-			head:    &util.SimpleHead{Kind: "PersistentVolume"},
+			Name: "a",
+			Head: &util.SimpleHead{Kind: "Namespace"},
 		},
 		{
-			name:    "g",
-			content: "",
-			head:    &util.SimpleHead{Kind: "PersistentVolumeClaim"},
+			Name: "f",
+			Head: &util.SimpleHead{Kind: "PersistentVolume"},
 		},
 		{
-			name:    "o",
-			content: "",
-			head:    &util.SimpleHead{Kind: "Pod"},
+			Name: "g",
+			Head: &util.SimpleHead{Kind: "PersistentVolumeClaim"},
 		},
 		{
-			name:    "q",
-			content: "",
-			head:    &util.SimpleHead{Kind: "ReplicaSet"},
+			Name: "o",
+			Head: &util.SimpleHead{Kind: "Pod"},
 		},
 		{
-			name:    "p",
-			content: "",
-			head:    &util.SimpleHead{Kind: "ReplicationController"},
+			Name: "3",
+			Head: &util.SimpleHead{Kind: "PodSecurityPolicy"},
 		},
 		{
-			name:    "b",
-			content: "",
-			head:    &util.SimpleHead{Kind: "ResourceQuota"},
+			Name: "q",
+			Head: &util.SimpleHead{Kind: "ReplicaSet"},
 		},
 		{
-			name:    "k",
-			content: "",
-			head:    &util.SimpleHead{Kind: "Role"},
+			Name: "p",
+			Head: &util.SimpleHead{Kind: "ReplicationController"},
 		},
 		{
-			name:    "l",
-			content: "",
-			head:    &util.SimpleHead{Kind: "RoleBinding"},
+			Name: "b",
+			Head: &util.SimpleHead{Kind: "ResourceQuota"},
 		},
 		{
-			name:    "d",
-			content: "",
-			head:    &util.SimpleHead{Kind: "Secret"},
+			Name: "k",
+			Head: &util.SimpleHead{Kind: "Role"},
 		},
 		{
-			name:    "m",
-			content: "",
-			head:    &util.SimpleHead{Kind: "Service"},
+			Name: "l",
+			Head: &util.SimpleHead{Kind: "RoleBinding"},
 		},
 		{
-			name:    "h",
-			content: "",
-			head:    &util.SimpleHead{Kind: "ServiceAccount"},
+			Name: "d",
+			Head: &util.SimpleHead{Kind: "Secret"},
 		},
 		{
-			name:    "s",
-			content: "",
-			head:    &util.SimpleHead{Kind: "StatefulSet"},
+			Name: "m",
+			Head: &util.SimpleHead{Kind: "Service"},
+		},
+		{
+			Name: "h",
+			Head: &util.SimpleHead{Kind: "ServiceAccount"},
+		},
+		{
+			Name: "s",
+			Head: &util.SimpleHead{Kind: "StatefulSet"},
+		},
+		{
+			Name: "1",
+			Head: &util.SimpleHead{Kind: "StorageClass"},
+		},
+		{
+			Name: "w",
+			Head: &util.SimpleHead{Kind: "APIService"},
+		},
+		{
+			Name: "z",
+			Head: &util.SimpleHead{Kind: "PodDisruptionBudget"},
 		},
 	}
 
@@ -147,8 +144,8 @@ func TestKindSorter(t *testing.T) {
 		order       SortOrder
 		expected    string
 	}{
-		{"install", InstallOrder, "abcdefghijklmnopqrstuv!"},
-		{"uninstall", UninstallOrder, "vmutsrqponlkjihgfedcba!"},
+		{"install", InstallOrder, "abc3zde1fgh2ijklmnopqrstuvw!"},
+		{"uninstall", UninstallOrder, "wvmutsrqponlkji2hgf1edz3cba!"},
 	} {
 		var buf bytes.Buffer
 		t.Run(test.description, func(t *testing.T) {
@@ -157,11 +154,93 @@ func TestKindSorter(t *testing.T) {
 			}
 			defer buf.Reset()
 			for _, r := range sortByKind(manifests, test.order) {
-				buf.WriteString(r.name)
+				buf.WriteString(r.Name)
 			}
 			if got := buf.String(); got != test.expected {
 				t.Errorf("Expected %q, got %q", test.expected, got)
 			}
 		})
+	}
+}
+
+// TestKindSorterSubSort verifies manifests of same kind are also sorted alphanumeric
+func TestKindSorterSubSort(t *testing.T) {
+	manifests := []Manifest{
+		{
+			Name: "a",
+			Head: &util.SimpleHead{Kind: "ClusterRole"},
+		},
+		{
+			Name: "A",
+			Head: &util.SimpleHead{Kind: "ClusterRole"},
+		},
+		{
+			Name: "0",
+			Head: &util.SimpleHead{Kind: "ConfigMap"},
+		},
+		{
+			Name: "1",
+			Head: &util.SimpleHead{Kind: "ConfigMap"},
+		},
+		{
+			Name: "z",
+			Head: &util.SimpleHead{Kind: "ClusterRoleBinding"},
+		},
+		{
+			Name: "!",
+			Head: &util.SimpleHead{Kind: "ClusterRoleBinding"},
+		},
+		{
+			Name: "u2",
+			Head: &util.SimpleHead{Kind: "Unknown"},
+		},
+		{
+			Name: "u1",
+			Head: &util.SimpleHead{Kind: "Unknown"},
+		},
+		{
+			Name: "t3",
+			Head: &util.SimpleHead{Kind: "Unknown2"},
+		},
+	}
+	for _, test := range []struct {
+		description string
+		order       SortOrder
+		expected    string
+	}{
+		// expectation is sorted by kind (unknown is last) and then sub sorted alphabetically within each group
+		{"cm,clusterRole,clusterRoleBinding,Unknown,Unknown2", InstallOrder, "01Aa!zu1u2t3"},
+	} {
+		var buf bytes.Buffer
+		t.Run(test.description, func(t *testing.T) {
+			defer buf.Reset()
+			for _, r := range sortByKind(manifests, test.order) {
+				buf.WriteString(r.Name)
+			}
+			if got := buf.String(); got != test.expected {
+				t.Errorf("Expected %q, got %q", test.expected, got)
+			}
+		})
+	}
+}
+
+func TestKindSorterNamespaceAgainstUnknown(t *testing.T) {
+	unknown := Manifest{
+		Name: "a",
+		Head: &util.SimpleHead{Kind: "Unknown"},
+	}
+	namespace := Manifest{
+		Name: "b",
+		Head: &util.SimpleHead{Kind: "Namespace"},
+	}
+
+	manifests := []Manifest{unknown, namespace}
+	sortByKind(manifests, InstallOrder)
+
+	expectedOrder := []Manifest{namespace, unknown}
+	for i, manifest := range manifests {
+		if expectedOrder[i].Name != manifest.Name {
+			t.Errorf("Expected %s, got %s", expectedOrder[i].Name, manifest.Name)
+		}
 	}
 }

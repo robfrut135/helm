@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,17 +26,18 @@ import (
 	"io"
 	"time"
 
+	"k8s.io/api/core/v1"
+	"k8s.io/cli-runtime/pkg/genericclioptions/resource"
+
 	"k8s.io/helm/pkg/chartutil"
 	"k8s.io/helm/pkg/engine"
 	"k8s.io/helm/pkg/kube"
 	"k8s.io/helm/pkg/proto/hapi/chart"
 	"k8s.io/helm/pkg/storage"
 	"k8s.io/helm/pkg/storage/driver"
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/kubectl/resource"
 )
 
-// DefaultTillerNamespace is the default namespace for tiller.
+// DefaultTillerNamespace is the default namespace for Tiller.
 const DefaultTillerNamespace = "kube-system"
 
 // GoTplEngine is the name of the Go template engine, as registered in the EngineYard.
@@ -97,8 +98,6 @@ type Engine interface {
 type KubeClient interface {
 	// Create creates one or more resources.
 	//
-	// namespace must contain a valid existing namespace.
-	//
 	// reader must contain a YAML stream (one or more YAML documents separated
 	// by "\n---\n").
 	Create(namespace string, reader io.Reader, timeout int64, shouldWait bool) error
@@ -120,7 +119,7 @@ type KubeClient interface {
 	// by "\n---\n").
 	Delete(namespace string, reader io.Reader) error
 
-	// Watch the resource in reader until it is "ready".
+	// WatchUntilReady watch the resource in reader until it is "ready".
 	//
 	// For Jobs, "ready" means the job ran to completion (excited without error).
 	// For all other kinds, it means the kind was created or modified without
@@ -128,20 +127,20 @@ type KubeClient interface {
 	WatchUntilReady(namespace string, reader io.Reader, timeout int64, shouldWait bool) error
 
 	// Update updates one or more resources or creates the resource
-	// if it doesn't exist
+	// if it doesn't exist.
 	//
-	// namespace must contain a valid existing namespace
+	// namespace must contain a valid existing namespace.
 	//
 	// reader must contain a YAML stream (one or more YAML documents separated
 	// by "\n---\n").
-	Update(namespace string, originalReader, modifiedReader io.Reader, recreate bool, timeout int64, shouldWait bool) error
+	Update(namespace string, originalReader, modifiedReader io.Reader, force bool, recreate bool, timeout int64, shouldWait bool) error
 
 	Build(namespace string, reader io.Reader) (kube.Result, error)
 	BuildUnstructured(namespace string, reader io.Reader) (kube.Result, error)
 
 	// WaitAndGetCompletedPodPhase waits up to a timeout until a pod enters a completed phase
-	// and returns said phase (PodSucceeded or PodFailed qualify)
-	WaitAndGetCompletedPodPhase(namespace string, reader io.Reader, timeout time.Duration) (api.PodPhase, error)
+	// and returns said phase (PodSucceeded or PodFailed qualify).
+	WaitAndGetCompletedPodPhase(namespace string, reader io.Reader, timeout time.Duration) (v1.PodPhase, error)
 }
 
 // PrintingKubeClient implements KubeClient, but simply prints the reader to
@@ -177,7 +176,7 @@ func (p *PrintingKubeClient) WatchUntilReady(ns string, r io.Reader, timeout int
 }
 
 // Update implements KubeClient Update.
-func (p *PrintingKubeClient) Update(ns string, currentReader, modifiedReader io.Reader, recreate bool, timeout int64, shouldWait bool) error {
+func (p *PrintingKubeClient) Update(ns string, currentReader, modifiedReader io.Reader, force bool, recreate bool, timeout int64, shouldWait bool) error {
 	_, err := io.Copy(p.Out, modifiedReader)
 	return err
 }
@@ -192,10 +191,10 @@ func (p *PrintingKubeClient) BuildUnstructured(ns string, reader io.Reader) (kub
 	return []*resource.Info{}, nil
 }
 
-// WaitAndGetCompletedPodPhase implements KubeClient WaitAndGetCompletedPodPhase
-func (p *PrintingKubeClient) WaitAndGetCompletedPodPhase(namespace string, reader io.Reader, timeout time.Duration) (api.PodPhase, error) {
+// WaitAndGetCompletedPodPhase implements KubeClient WaitAndGetCompletedPodPhase.
+func (p *PrintingKubeClient) WaitAndGetCompletedPodPhase(namespace string, reader io.Reader, timeout time.Duration) (v1.PodPhase, error) {
 	_, err := io.Copy(p.Out, reader)
-	return api.PodUnknown, err
+	return v1.PodUnknown, err
 }
 
 // Environment provides the context for executing a client request.
@@ -222,6 +221,5 @@ func New() *Environment {
 	return &Environment{
 		EngineYard: ey,
 		Releases:   storage.Init(driver.NewMemory()),
-		KubeClient: kube.New(nil),
 	}
 }

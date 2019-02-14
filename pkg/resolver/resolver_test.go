@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -146,7 +146,7 @@ func TestResolve(t *testing.T) {
 }
 
 func TestHashReq(t *testing.T) {
-	expect := "sha256:1feffe2016ca113f64159d91c1f77d6a83bcd23510b171d9264741bf9d63f741"
+	expect := "sha256:e70e41f8922e19558a8bf62f591a8b70c8e4622e3c03e5415f09aba881f13885"
 	req := &chartutil.Requirements{
 		Dependencies: []*chartutil.Dependency{
 			{Name: "alpine", Version: "0.1.0", Repository: "http://localhost:8879/charts"},

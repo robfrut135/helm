@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -59,8 +59,8 @@ The 'version' field should contain a semantic version or version range.
 
 The 'repository' URL should point to a Chart Repository. Helm expects that by
 appending '/index.yaml' to the URL, it should be able to retrieve the chart
-repository's index. Note: 'repository' cannot be a repository alias. It must be
-a URL.
+repository's index. Note: 'repository' can be an alias. The alias must start
+with 'alias:' or '@'.
 
 Starting from 2.2.0, repository can be defined as the path to the directory of
 the dependency charts stored locally. The path should start with a prefix of
@@ -108,9 +108,8 @@ type dependencyListCmd struct {
 }
 
 func newDependencyListCmd(out io.Writer) *cobra.Command {
-	dlc := &dependencyListCmd{
-		out: out,
-	}
+	dlc := &dependencyListCmd{out: out}
+
 	cmd := &cobra.Command{
 		Use:     "list [flags] CHART",
 		Aliases: []string{"ls"},
@@ -142,7 +141,7 @@ func (l *dependencyListCmd) run() error {
 	r, err := chartutil.LoadRequirements(c)
 	if err != nil {
 		if err == chartutil.ErrRequirementsNotFound {
-			fmt.Fprintf(l.out, "WARNING: no requirements at %s/charts\n", l.chartpath)
+			fmt.Fprintf(l.out, "WARNING: no requirements at %s\n", filepath.Join(l.chartpath, "charts"))
 			return nil
 		}
 		return err
@@ -150,7 +149,7 @@ func (l *dependencyListCmd) run() error {
 
 	l.printRequirements(r, l.out)
 	fmt.Fprintln(l.out)
-	l.printMissing(r, l.out)
+	l.printMissing(r)
 	return nil
 }
 
@@ -240,7 +239,7 @@ func (l *dependencyListCmd) printRequirements(reqs *chartutil.Requirements, out 
 }
 
 // printMissing prints warnings about charts that are present on disk, but are not in the requirements.
-func (l *dependencyListCmd) printMissing(reqs *chartutil.Requirements, out io.Writer) {
+func (l *dependencyListCmd) printMissing(reqs *chartutil.Requirements) {
 	folder := filepath.Join(l.chartpath, "charts/*")
 	files, err := filepath.Glob(folder)
 	if err != nil {

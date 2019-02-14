@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -21,7 +21,6 @@ import (
 	"os"
 	"os/exec"
 
-	"k8s.io/helm/pkg/helm/helmpath"
 	"k8s.io/helm/pkg/plugin"
 
 	"github.com/spf13/cobra"
@@ -41,12 +40,13 @@ func newPluginCmd(out io.Writer) *cobra.Command {
 		newPluginInstallCmd(out),
 		newPluginListCmd(out),
 		newPluginRemoveCmd(out),
+		newPluginUpdateCmd(out),
 	)
 	return cmd
 }
 
 // runHook will execute a plugin hook.
-func runHook(p *plugin.Plugin, event string, home helmpath.Home) error {
+func runHook(p *plugin.Plugin, event string) error {
 	hook := p.Metadata.Hooks.Get(event)
 	if hook == "" {
 		return nil
@@ -59,7 +59,7 @@ func runHook(p *plugin.Plugin, event string, home helmpath.Home) error {
 
 	debug("running %s hook: %s", event, prog)
 
-	setupEnv(p.Metadata.Name, p.Dir, home.Plugins(), home)
+	plugin.SetupPluginEnv(settings, p.Metadata.Name, p.Dir)
 	prog.Stdout, prog.Stderr = os.Stdout, os.Stderr
 	if err := prog.Run(); err != nil {
 		if eerr, ok := err.(*exec.ExitError); ok {

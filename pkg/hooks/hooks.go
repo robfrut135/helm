@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,6 +26,9 @@ const HookAnno = "helm.sh/hook"
 // HookWeightAnno is the label name for a hook weight
 const HookWeightAnno = "helm.sh/hook-weight"
 
+// HookDeleteAnno is the label name for the delete policy for a hook
+const HookDeleteAnno = "helm.sh/hook-delete-policy"
+
 // Types of hooks
 const (
 	PreInstall         = "pre-install"
@@ -38,6 +41,14 @@ const (
 	PostRollback       = "post-rollback"
 	ReleaseTestSuccess = "test-success"
 	ReleaseTestFailure = "test-failure"
+	CRDInstall         = "crd-install"
+)
+
+// Type of policy for deleting the hook
+const (
+	HookSucceeded      = "hook-succeeded"
+	HookFailed         = "hook-failed"
+	BeforeHookCreation = "before-hook-creation"
 )
 
 // FilterTestHooks filters the list of hooks are returns only testing hooks.

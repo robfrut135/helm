@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,18 +20,24 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"os"
 	"regexp"
-	"strings"
 	"testing"
+	"time"
 
+	"github.com/ghodss/yaml"
 	"github.com/golang/protobuf/ptypes/timestamp"
+	"github.com/technosophos/moniker"
 	"golang.org/x/net/context"
-	grpc "google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
-	"k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/fake"
+	"k8s.io/api/core/v1"
+	"k8s.io/cli-runtime/pkg/genericclioptions/resource"
+	"k8s.io/client-go/kubernetes/fake"
 
 	"k8s.io/helm/pkg/helm"
+	"k8s.io/helm/pkg/hooks"
+	"k8s.io/helm/pkg/kube"
 	"k8s.io/helm/pkg/proto/hapi/chart"
 	"k8s.io/helm/pkg/proto/hapi/release"
 	"k8s.io/helm/pkg/proto/hapi/services"
@@ -42,19 +48,34 @@ import (
 
 const notesText = "my notes here"
 
-var manifestWithHook = `apiVersion: v1
-kind: ConfigMap
+var manifestWithHook = `kind: ConfigMap
 metadata:
   name: test-cm
   annotations:
     "helm.sh/hook": post-install,pre-delete
 data:
-  name: value
+  name: value`
+
+var manifestWithCRDHook = `
+apiVersion: apiextensions.k8s.io/v1beta1
+kind: CustomResourceDefinition
+metadata:
+  name: crontabs.stable.example.com
+  annotations:
+    "helm.sh/hook": crd-install
+spec:
+  group: stable.example.com
+  version: v1
+  scope: Namespaced
+  names:
+    plural: crontabs
+    singular: crontab
+    kind: CronTab
+    shortNames:
+    - ct
 `
 
-var manifestWithTestHook = `
-apiVersion: v1
-kind: Pod
+var manifestWithTestHook = `kind: Pod
 metadata:
   name: finding-nemo,
   annotations:
@@ -66,8 +87,7 @@ spec:
     cmd: fake-command
 `
 
-var manifestWithKeep = `apiVersion: v1
-kind: ConfigMap
+var manifestWithKeep = `kind: ConfigMap
 metadata:
   name: test-cm-keep
   annotations:
@@ -76,18 +96,15 @@ data:
   name: value
 `
 
-var manifestWithUpgradeHooks = `apiVersion: v1
-kind: ConfigMap
+var manifestWithUpgradeHooks = `kind: ConfigMap
 metadata:
   name: test-cm
   annotations:
     "helm.sh/hook": post-upgrade,pre-upgrade
 data:
-  name: value
-`
+  name: value`
 
-var manifestWithRollbackHooks = `apiVersion: v1
-kind: ConfigMap
+var manifestWithRollbackHooks = `kind: ConfigMap
 metadata:
   name: test-cm
   annotations:
@@ -96,30 +113,138 @@ data:
   name: value
 `
 
+type chartOptions struct {
+	*chart.Chart
+}
+
+type chartOption func(*chartOptions)
+
 func rsFixture() *ReleaseServer {
-	return &ReleaseServer{
-		env:       MockEnvironment(),
-		clientset: fake.NewSimpleClientset(),
+	return NewReleaseServer(MockEnvironment(), fake.NewSimpleClientset(), false)
+}
+
+func buildChart(opts ...chartOption) *chart.Chart {
+	c := &chartOptions{
+		Chart: &chart.Chart{
+			// TODO: This should be more complete.
+			Metadata: &chart.Metadata{
+				Name: "hello",
+			},
+			// This adds a basic template and hooks.
+			Templates: []*chart.Template{
+				{Name: "templates/hello", Data: []byte("hello: world")},
+				{Name: "templates/hooks", Data: []byte(manifestWithHook)},
+			},
+		},
+	}
+
+	for _, opt := range opts {
+		opt(c)
+	}
+
+	return c.Chart
+}
+
+func withKube(version string) chartOption {
+	return func(opts *chartOptions) {
+		opts.Metadata.KubeVersion = version
 	}
 }
 
-// chartStub creates a fully stubbed out chart.
-func chartStub() *chart.Chart {
-	return &chart.Chart{
-		// TODO: This should be more complete.
-		Metadata: &chart.Metadata{
-			Name: "hello",
-		},
-		// This adds basic templates, partials, and hooks.
-		Templates: []*chart.Template{
-			{Name: "templates/hello", Data: []byte("hello: world")},
+func withTiller(version string) chartOption {
+	return func(opts *chartOptions) {
+		opts.Metadata.TillerVersion = version
+	}
+}
+
+func withDependency(dependencyOpts ...chartOption) chartOption {
+	return func(opts *chartOptions) {
+		opts.Dependencies = append(opts.Dependencies, buildChart(dependencyOpts...))
+	}
+}
+
+func withNotes(notes string) chartOption {
+	return func(opts *chartOptions) {
+		opts.Templates = append(opts.Templates, &chart.Template{
+			Name: "templates/NOTES.txt",
+			Data: []byte(notes),
+		})
+	}
+}
+
+func withSampleTemplates() chartOption {
+	return func(opts *chartOptions) {
+		sampleTemplates := []*chart.Template{
+			// This adds basic templates and partials.
 			{Name: "templates/goodbye", Data: []byte("goodbye: world")},
 			{Name: "templates/empty", Data: []byte("")},
 			{Name: "templates/with-partials", Data: []byte(`hello: {{ template "_planet" . }}`)},
 			{Name: "templates/partials/_planet", Data: []byte(`{{define "_planet"}}Earth{{end}}`)},
-			{Name: "templates/hooks", Data: []byte(manifestWithHook)},
+		}
+		opts.Templates = append(opts.Templates, sampleTemplates...)
+	}
+}
+
+type installOptions struct {
+	*services.InstallReleaseRequest
+}
+
+type installOption func(*installOptions)
+
+func withName(name string) installOption {
+	return func(opts *installOptions) {
+		opts.Name = name
+	}
+}
+
+func withDryRun() installOption {
+	return func(opts *installOptions) {
+		opts.DryRun = true
+	}
+}
+
+func withDisabledHooks() installOption {
+	return func(opts *installOptions) {
+		opts.DisableHooks = true
+	}
+}
+
+func withReuseName() installOption {
+	return func(opts *installOptions) {
+		opts.ReuseName = true
+	}
+}
+
+func withChart(chartOpts ...chartOption) installOption {
+	return func(opts *installOptions) {
+		opts.Chart = buildChart(chartOpts...)
+	}
+}
+
+func withSubNotes() installOption {
+	return func(opts *installOptions) {
+		opts.SubNotes = true
+	}
+}
+
+func installRequest(opts ...installOption) *services.InstallReleaseRequest {
+	reqOpts := &installOptions{
+		&services.InstallReleaseRequest{
+			Namespace: "spaced",
+			Chart:     buildChart(),
 		},
 	}
+
+	for _, opt := range opts {
+		opt(reqOpts)
+	}
+
+	return reqOpts.InstallReleaseRequest
+}
+
+// chartStub creates a fully stubbed out chart.
+func chartStub() *chart.Chart {
+	return buildChart(withSampleTemplates())
 }
 
 // releaseStub creates a release stub, complete with the chartStub as its chart.
@@ -182,22 +307,23 @@ func upgradeReleaseVersion(rel *release.Release) *release.Release {
 }
 
 func TestValidName(t *testing.T) {
-	for name, valid := range map[string]bool{
-		"nina pinta santa-maria": false,
-		"nina-pinta-santa-maria": true,
-		"-nina":                  false,
-		"pinta-":                 false,
-		"santa-maria":            true,
-		"niña":                   false,
-		"...":                    false,
-		"pinta...":               false,
-		"santa...maria":          true,
-		"":                       false,
-		" ":                      false,
-		".nina.":                 false,
-		"nina.pinta":             true,
+	for name, valid := range map[string]error{
+		"nina pinta santa-maria": errInvalidName,
+		"nina-pinta-santa-maria": nil,
+		"-nina":                  errInvalidName,
+		"pinta-":                 errInvalidName,
+		"santa-maria":            nil,
+		"niña":                   errInvalidName,
+		"...":                    errInvalidName,
+		"pinta...":               errInvalidName,
+		"santa...maria":          nil,
+		"":                       errMissingRelease,
+		" ":                      errInvalidName,
+		".nina.":                 errInvalidName,
+		"nina.pinta":             nil,
+		"abcdefghi-abcdefghi-abcdefghi-abcdefghi-abcdefghi-abcd": errInvalidName,
 	} {
-		if valid != ValidName.MatchString(name) {
+		if valid != validateReleaseName(name) {
 			t.Errorf("Expected %q to be %t", name, valid)
 		}
 	}
@@ -205,7 +331,7 @@ func TestValidName(t *testing.T) {
 
 func TestGetVersionSet(t *testing.T) {
 	rs := rsFixture()
-	vs, err := getVersionSet(rs.clientset.Discovery())
+	vs, err := GetVersionSet(rs.clientset.Discovery())
 	if err != nil {
 		t.Error(err)
 	}
@@ -261,973 +387,60 @@ func TestUniqName(t *testing.T) {
 	}
 }
 
-func TestInstallRelease(t *testing.T) {
-	c := helm.NewContext()
-	rs := rsFixture()
+type fakeNamer struct {
+	name string
+}
 
-	// TODO: Refactor this into a mock.
-	req := &services.InstallReleaseRequest{
-		Namespace: "spaced",
-		Chart: &chart.Chart{
-			Metadata: &chart.Metadata{Name: "hello"},
-			Templates: []*chart.Template{
-				{Name: "templates/hello", Data: []byte("hello: world")},
-				{Name: "templates/hooks", Data: []byte(manifestWithHook)},
-			},
-		},
-	}
-	res, err := rs.InstallRelease(c, req)
-	if err != nil {
-		t.Fatalf("Failed install: %s", err)
-	}
-	if res.Release.Name == "" {
-		t.Errorf("Expected release name.")
-	}
-	if res.Release.Namespace != "spaced" {
-		t.Errorf("Expected release namespace 'spaced', got '%s'.", res.Release.Namespace)
-	}
-
-	rel, err := rs.env.Releases.Get(res.Release.Name, res.Release.Version)
-	if err != nil {
-		t.Errorf("Expected release for %s (%v).", res.Release.Name, rs.env.Releases)
-	}
-
-	t.Logf("rel: %v", rel)
-
-	if len(rel.Hooks) != 1 {
-		t.Fatalf("Expected 1 hook, got %d", len(rel.Hooks))
-	}
-	if rel.Hooks[0].Manifest != manifestWithHook {
-		t.Errorf("Unexpected manifest: %v", rel.Hooks[0].Manifest)
-	}
-
-	if rel.Hooks[0].Events[0] != release.Hook_POST_INSTALL {
-		t.Errorf("Expected event 0 is post install")
-	}
-	if rel.Hooks[0].Events[1] != release.Hook_PRE_DELETE {
-		t.Errorf("Expected event 0 is pre-delete")
-	}
-
-	if len(res.Release.Manifest) == 0 {
-		t.Errorf("No manifest returned: %v", res.Release)
-	}
-
-	if len(rel.Manifest) == 0 {
-		t.Errorf("Expected manifest in %v", res)
-	}
-
-	if !strings.Contains(rel.Manifest, "---\n# Source: hello/templates/hello\nhello: world") {
-		t.Errorf("unexpected output: %s", rel.Manifest)
-	}
-
-	if rel.Info.Description != "Install complete" {
-		t.Errorf("unexpected description: %s", rel.Info.Description)
+func NewFakeNamer(nam string) moniker.Namer {
+	return &fakeNamer{
+		name: nam,
 	}
 }
 
-func TestInstallReleaseWithNotes(t *testing.T) {
-	c := helm.NewContext()
-	rs := rsFixture()
-
-	// TODO: Refactor this into a mock.
-	req := &services.InstallReleaseRequest{
-		Namespace: "spaced",
-		Chart: &chart.Chart{
-			Metadata: &chart.Metadata{Name: "hello"},
-			Templates: []*chart.Template{
-				{Name: "templates/hello", Data: []byte("hello: world")},
-				{Name: "templates/hooks", Data: []byte(manifestWithHook)},
-				{Name: "templates/NOTES.txt", Data: []byte(notesText)},
-			},
-		},
-	}
-	res, err := rs.InstallRelease(c, req)
-	if err != nil {
-		t.Fatalf("Failed install: %s", err)
-	}
-	if res.Release.Name == "" {
-		t.Errorf("Expected release name.")
-	}
-	if res.Release.Namespace != "spaced" {
-		t.Errorf("Expected release namespace 'spaced', got '%s'.", res.Release.Namespace)
-	}
-
-	rel, err := rs.env.Releases.Get(res.Release.Name, res.Release.Version)
-	if err != nil {
-		t.Errorf("Expected release for %s (%v).", res.Release.Name, rs.env.Releases)
-	}
-
-	t.Logf("rel: %v", rel)
-
-	if len(rel.Hooks) != 1 {
-		t.Fatalf("Expected 1 hook, got %d", len(rel.Hooks))
-	}
-	if rel.Hooks[0].Manifest != manifestWithHook {
-		t.Errorf("Unexpected manifest: %v", rel.Hooks[0].Manifest)
-	}
-
-	if rel.Info.Status.Notes != notesText {
-		t.Fatalf("Expected '%s', got '%s'", notesText, rel.Info.Status.Notes)
-	}
-
-	if rel.Hooks[0].Events[0] != release.Hook_POST_INSTALL {
-		t.Errorf("Expected event 0 is post install")
-	}
-	if rel.Hooks[0].Events[1] != release.Hook_PRE_DELETE {
-		t.Errorf("Expected event 0 is pre-delete")
-	}
-
-	if len(res.Release.Manifest) == 0 {
-		t.Errorf("No manifest returned: %v", res.Release)
-	}
-
-	if len(rel.Manifest) == 0 {
-		t.Errorf("Expected manifest in %v", res)
-	}
-
-	if !strings.Contains(rel.Manifest, "---\n# Source: hello/templates/hello\nhello: world") {
-		t.Errorf("unexpected output: %s", rel.Manifest)
-	}
-
-	if rel.Info.Description != "Install complete" {
-		t.Errorf("unexpected description: %s", rel.Info.Description)
-	}
+func (f *fakeNamer) Name() string {
+	return f.NameSep(" ")
 }
 
-func TestInstallReleaseWithNotesRendered(t *testing.T) {
-	c := helm.NewContext()
-	rs := rsFixture()
-
-	// TODO: Refactor this into a mock.
-	req := &services.InstallReleaseRequest{
-		Namespace: "spaced",
-		Chart: &chart.Chart{
-			Metadata: &chart.Metadata{Name: "hello"},
-			Templates: []*chart.Template{
-				{Name: "templates/hello", Data: []byte("hello: world")},
-				{Name: "templates/hooks", Data: []byte(manifestWithHook)},
-				{Name: "templates/NOTES.txt", Data: []byte(notesText + " {{.Release.Name}}")},
-			},
-		},
-	}
-	res, err := rs.InstallRelease(c, req)
-	if err != nil {
-		t.Fatalf("Failed install: %s", err)
-	}
-	if res.Release.Name == "" {
-		t.Errorf("Expected release name.")
-	}
-	if res.Release.Namespace != "spaced" {
-		t.Errorf("Expected release namespace 'spaced', got '%s'.", res.Release.Namespace)
-	}
-
-	rel, err := rs.env.Releases.Get(res.Release.Name, res.Release.Version)
-	if err != nil {
-		t.Errorf("Expected release for %s (%v).", res.Release.Name, rs.env.Releases)
-	}
-
-	t.Logf("rel: %v", rel)
-
-	if len(rel.Hooks) != 1 {
-		t.Fatalf("Expected 1 hook, got %d", len(rel.Hooks))
-	}
-	if rel.Hooks[0].Manifest != manifestWithHook {
-		t.Errorf("Unexpected manifest: %v", rel.Hooks[0].Manifest)
-	}
-
-	expectedNotes := fmt.Sprintf("%s %s", notesText, res.Release.Name)
-	if rel.Info.Status.Notes != expectedNotes {
-		t.Fatalf("Expected '%s', got '%s'", expectedNotes, rel.Info.Status.Notes)
-	}
-
-	if rel.Hooks[0].Events[0] != release.Hook_POST_INSTALL {
-		t.Errorf("Expected event 0 is post install")
-	}
-	if rel.Hooks[0].Events[1] != release.Hook_PRE_DELETE {
-		t.Errorf("Expected event 0 is pre-delete")
-	}
-
-	if len(res.Release.Manifest) == 0 {
-		t.Errorf("No manifest returned: %v", res.Release)
-	}
-
-	if len(rel.Manifest) == 0 {
-		t.Errorf("Expected manifest in %v", res)
-	}
-
-	if !strings.Contains(rel.Manifest, "---\n# Source: hello/templates/hello\nhello: world") {
-		t.Errorf("unexpected output: %s", rel.Manifest)
-	}
-
-	if rel.Info.Description != "Install complete" {
-		t.Errorf("unexpected description: %s", rel.Info.Description)
-	}
+func (f *fakeNamer) NameSep(sep string) string {
+	return f.name
 }
 
-func TestInstallReleaseWithChartAndDependencyNotes(t *testing.T) {
-	c := helm.NewContext()
+func TestCreateUniqueName(t *testing.T) {
 	rs := rsFixture()
 
-	// TODO: Refactor this into a mock.
-	req := &services.InstallReleaseRequest{
-		Namespace: "spaced",
-		Chart: &chart.Chart{
-			Metadata: &chart.Metadata{Name: "hello"},
-			Templates: []*chart.Template{
-				{Name: "templates/hello", Data: []byte("hello: world")},
-				{Name: "templates/hooks", Data: []byte(manifestWithHook)},
-				{Name: "templates/NOTES.txt", Data: []byte(notesText)},
-			},
-			Dependencies: []*chart.Chart{
-				{
-					Metadata: &chart.Metadata{Name: "hello"},
-					Templates: []*chart.Template{
-						{Name: "templates/hello", Data: []byte("hello: world")},
-						{Name: "templates/hooks", Data: []byte(manifestWithHook)},
-						{Name: "templates/NOTES.txt", Data: []byte(notesText + " child")},
-					},
-				},
-			},
-		},
-	}
-
-	res, err := rs.InstallRelease(c, req)
-	if err != nil {
-		t.Fatalf("Failed install: %s", err)
-	}
-	if res.Release.Name == "" {
-		t.Errorf("Expected release name.")
-	}
-
-	rel, err := rs.env.Releases.Get(res.Release.Name, res.Release.Version)
-	if err != nil {
-		t.Errorf("Expected release for %s (%v).", res.Release.Name, rs.env.Releases)
-	}
-
-	t.Logf("rel: %v", rel)
-
-	if rel.Info.Status.Notes != notesText {
-		t.Fatalf("Expected '%s', got '%s'", notesText, rel.Info.Status.Notes)
-	}
-
-	if rel.Info.Description != "Install complete" {
-		t.Errorf("unexpected description: %s", rel.Info.Description)
-	}
-}
-
-func TestInstallReleaseDryRun(t *testing.T) {
-	c := helm.NewContext()
-	rs := rsFixture()
-
-	req := &services.InstallReleaseRequest{
-		Chart:  chartStub(),
-		DryRun: true,
-	}
-	res, err := rs.InstallRelease(c, req)
-	if err != nil {
-		t.Errorf("Failed install: %s", err)
-	}
-	if res.Release.Name == "" {
-		t.Errorf("Expected release name.")
-	}
-
-	if !strings.Contains(res.Release.Manifest, "---\n# Source: hello/templates/hello\nhello: world") {
-		t.Errorf("unexpected output: %s", res.Release.Manifest)
-	}
-
-	if !strings.Contains(res.Release.Manifest, "---\n# Source: hello/templates/goodbye\ngoodbye: world") {
-		t.Errorf("unexpected output: %s", res.Release.Manifest)
-	}
-
-	if !strings.Contains(res.Release.Manifest, "hello: Earth") {
-		t.Errorf("Should contain partial content. %s", res.Release.Manifest)
-	}
-
-	if strings.Contains(res.Release.Manifest, "hello: {{ template \"_planet\" . }}") {
-		t.Errorf("Should not contain partial templates itself. %s", res.Release.Manifest)
-	}
-
-	if strings.Contains(res.Release.Manifest, "empty") {
-		t.Errorf("Should not contain template data for an empty file. %s", res.Release.Manifest)
-	}
-
-	if _, err := rs.env.Releases.Get(res.Release.Name, res.Release.Version); err == nil {
-		t.Errorf("Expected no stored release.")
-	}
-
-	if l := len(res.Release.Hooks); l != 1 {
-		t.Fatalf("Expected 1 hook, got %d", l)
-	}
-
-	if res.Release.Hooks[0].LastRun != nil {
-		t.Error("Expected hook to not be marked as run.")
-	}
-
-	if res.Release.Info.Description != "Dry run complete" {
-		t.Errorf("unexpected description: %s", res.Release.Info.Description)
-	}
-}
-
-func TestInstallReleaseNoHooks(t *testing.T) {
-	c := helm.NewContext()
-	rs := rsFixture()
-	rs.env.Releases.Create(releaseStub())
-
-	req := &services.InstallReleaseRequest{
-		Chart:        chartStub(),
-		DisableHooks: true,
-	}
-	res, err := rs.InstallRelease(c, req)
-	if err != nil {
-		t.Errorf("Failed install: %s", err)
-	}
-
-	if hl := res.Release.Hooks[0].LastRun; hl != nil {
-		t.Errorf("Expected that no hooks were run. Got %d", hl)
-	}
-}
-
-func TestInstallReleaseFailedHooks(t *testing.T) {
-	c := helm.NewContext()
-	rs := rsFixture()
-	rs.env.Releases.Create(releaseStub())
-	rs.env.KubeClient = newHookFailingKubeClient()
-
-	req := &services.InstallReleaseRequest{
-		Chart: chartStub(),
-	}
-	res, err := rs.InstallRelease(c, req)
-	if err == nil {
-		t.Error("Expected failed install")
-	}
-
-	if hl := res.Release.Info.Status.Code; hl != release.Status_FAILED {
-		t.Errorf("Expected FAILED release. Got %d", hl)
-	}
-}
-
-func TestInstallReleaseReuseName(t *testing.T) {
-	c := helm.NewContext()
-	rs := rsFixture()
-	rel := releaseStub()
-	rel.Info.Status.Code = release.Status_DELETED
-	rs.env.Releases.Create(rel)
-
-	req := &services.InstallReleaseRequest{
-		Chart:     chartStub(),
-		ReuseName: true,
-		Name:      rel.Name,
-	}
-	res, err := rs.InstallRelease(c, req)
-	if err != nil {
-		t.Fatalf("Failed install: %s", err)
-	}
-
-	if res.Release.Name != rel.Name {
-		t.Errorf("expected %q, got %q", rel.Name, res.Release.Name)
-	}
-
-	getreq := &services.GetReleaseStatusRequest{Name: rel.Name, Version: 0}
-	getres, err := rs.GetReleaseStatus(c, getreq)
-	if err != nil {
-		t.Errorf("Failed to retrieve release: %s", err)
-	}
-	if getres.Info.Status.Code != release.Status_DEPLOYED {
-		t.Errorf("Release status is %q", getres.Info.Status.Code)
-	}
-}
-
-func TestUpdateRelease(t *testing.T) {
-	c := helm.NewContext()
-	rs := rsFixture()
-	rel := releaseStub()
-	rs.env.Releases.Create(rel)
-
-	req := &services.UpdateReleaseRequest{
-		Name: rel.Name,
-		Chart: &chart.Chart{
-			Metadata: &chart.Metadata{Name: "hello"},
-			Templates: []*chart.Template{
-				{Name: "templates/hello", Data: []byte("hello: world")},
-				{Name: "templates/hooks", Data: []byte(manifestWithUpgradeHooks)},
-			},
-		},
-	}
-	res, err := rs.UpdateRelease(c, req)
-	if err != nil {
-		t.Fatalf("Failed updated: %s", err)
-	}
-
-	if res.Release.Name == "" {
-		t.Errorf("Expected release name.")
-	}
-
-	if res.Release.Name != rel.Name {
-		t.Errorf("Updated release name does not match previous release name. Expected %s, got %s", rel.Name, res.Release.Name)
-	}
-
-	if res.Release.Namespace != rel.Namespace {
-		t.Errorf("Expected release namespace '%s', got '%s'.", rel.Namespace, res.Release.Namespace)
-	}
-
-	updated, err := rs.env.Releases.Get(res.Release.Name, res.Release.Version)
-	if err != nil {
-		t.Errorf("Expected release for %s (%v).", res.Release.Name, rs.env.Releases)
-	}
-
-	if len(updated.Hooks) != 1 {
-		t.Fatalf("Expected 1 hook, got %d", len(updated.Hooks))
-	}
-	if updated.Hooks[0].Manifest != manifestWithUpgradeHooks {
-		t.Errorf("Unexpected manifest: %v", updated.Hooks[0].Manifest)
-	}
-
-	if updated.Hooks[0].Events[0] != release.Hook_POST_UPGRADE {
-		t.Errorf("Expected event 0 to be post upgrade")
-	}
-
-	if updated.Hooks[0].Events[1] != release.Hook_PRE_UPGRADE {
-		t.Errorf("Expected event 0 to be pre upgrade")
-	}
-
-	if len(res.Release.Manifest) == 0 {
-		t.Errorf("No manifest returned: %v", res.Release)
-	}
-
-	if res.Release.Config == nil {
-		t.Errorf("Got release without config: %#v", res.Release)
-	} else if res.Release.Config.Raw != rel.Config.Raw {
-		t.Errorf("Expected release values %q, got %q", rel.Config.Raw, res.Release.Config.Raw)
-	}
-
-	if len(updated.Manifest) == 0 {
-		t.Errorf("Expected manifest in %v", res)
-	}
-
-	if !strings.Contains(updated.Manifest, "---\n# Source: hello/templates/hello\nhello: world") {
-		t.Errorf("unexpected output: %s", rel.Manifest)
-	}
-
-	if res.Release.Version != 2 {
-		t.Errorf("Expected release version to be %v, got %v", 2, res.Release.Version)
-	}
-
-	edesc := "Upgrade complete"
-	if got := res.Release.Info.Description; got != edesc {
-		t.Errorf("Expected description %q, got %q", edesc, got)
-	}
-}
-func TestUpdateRelease_ResetValues(t *testing.T) {
-	c := helm.NewContext()
-	rs := rsFixture()
-	rel := releaseStub()
-	rs.env.Releases.Create(rel)
-
-	req := &services.UpdateReleaseRequest{
-		Name: rel.Name,
-		Chart: &chart.Chart{
-			Metadata: &chart.Metadata{Name: "hello"},
-			Templates: []*chart.Template{
-				{Name: "templates/hello", Data: []byte("hello: world")},
-				{Name: "templates/hooks", Data: []byte(manifestWithUpgradeHooks)},
-			},
-		},
-		ResetValues: true,
-	}
-	res, err := rs.UpdateRelease(c, req)
-	if err != nil {
-		t.Fatalf("Failed updated: %s", err)
-	}
-	// This should have been unset. Config:  &chart.Config{Raw: `name: value`},
-	if res.Release.Config != nil && res.Release.Config.Raw != "" {
-		t.Errorf("Expected chart config to be empty, got %q", res.Release.Config.Raw)
-	}
-}
-
-func TestUpdateRelease_ReuseValues(t *testing.T) {
-	c := helm.NewContext()
-	rs := rsFixture()
-	rel := releaseStub()
-	rs.env.Releases.Create(rel)
-
-	req := &services.UpdateReleaseRequest{
-		Name: rel.Name,
-		Chart: &chart.Chart{
-			Metadata: &chart.Metadata{Name: "hello"},
-			Templates: []*chart.Template{
-				{Name: "templates/hello", Data: []byte("hello: world")},
-				{Name: "templates/hooks", Data: []byte(manifestWithUpgradeHooks)},
-			},
-			// Since reuseValues is set, this should get ignored.
-			Values: &chart.Config{Raw: "foo: bar\n"},
-		},
-		Values:      &chart.Config{Raw: "name2: val2"},
-		ReuseValues: true,
-	}
-	res, err := rs.UpdateRelease(c, req)
-	if err != nil {
-		t.Fatalf("Failed updated: %s", err)
-	}
-	// This should have been overwritten with the old value.
-	expect := "name: value\n"
-	if res.Release.Chart.Values != nil && res.Release.Chart.Values.Raw != expect {
-		t.Errorf("Expected chart values to be %q, got %q", expect, res.Release.Chart.Values.Raw)
-	}
-	// This should have the newly-passed overrides.
-	expect = "name2: val2"
-	if res.Release.Config != nil && res.Release.Config.Raw != expect {
-		t.Errorf("Expected request config to be %q, got %q", expect, res.Release.Config.Raw)
-	}
-}
-
-func TestUpdateRelease_ResetReuseValues(t *testing.T) {
-	// This verifies that when both reset and reuse are set, reset wins.
-	c := helm.NewContext()
-	rs := rsFixture()
-	rel := releaseStub()
-	rs.env.Releases.Create(rel)
-
-	req := &services.UpdateReleaseRequest{
-		Name: rel.Name,
-		Chart: &chart.Chart{
-			Metadata: &chart.Metadata{Name: "hello"},
-			Templates: []*chart.Template{
-				{Name: "templates/hello", Data: []byte("hello: world")},
-				{Name: "templates/hooks", Data: []byte(manifestWithUpgradeHooks)},
-			},
-		},
-		ResetValues: true,
-		ReuseValues: true,
-	}
-	res, err := rs.UpdateRelease(c, req)
-	if err != nil {
-		t.Fatalf("Failed updated: %s", err)
-	}
-	// This should have been unset. Config:  &chart.Config{Raw: `name: value`},
-	if res.Release.Config != nil && res.Release.Config.Raw != "" {
-		t.Errorf("Expected chart config to be empty, got %q", res.Release.Config.Raw)
-	}
-}
-
-func TestUpdateReleaseFailure(t *testing.T) {
-	c := helm.NewContext()
-	rs := rsFixture()
-	rel := releaseStub()
-	rs.env.Releases.Create(rel)
-	rs.env.KubeClient = newUpdateFailingKubeClient()
-
-	req := &services.UpdateReleaseRequest{
-		Name:         rel.Name,
-		DisableHooks: true,
-		Chart: &chart.Chart{
-			Metadata: &chart.Metadata{Name: "hello"},
-			Templates: []*chart.Template{
-				{Name: "templates/something", Data: []byte("hello: world")},
-			},
-		},
-	}
-
-	res, err := rs.UpdateRelease(c, req)
-	if err == nil {
-		t.Error("Expected failed update")
-	}
-
-	if updatedStatus := res.Release.Info.Status.Code; updatedStatus != release.Status_FAILED {
-		t.Errorf("Expected FAILED release. Got %d", updatedStatus)
-	}
-
-	edesc := "Upgrade \"angry-panda\" failed: Failed update in kube client"
-	if got := res.Release.Info.Description; got != edesc {
-		t.Errorf("Expected description %q, got %q", edesc, got)
-	}
-
-	oldRelease, err := rs.env.Releases.Get(rel.Name, rel.Version)
-	if err != nil {
-		t.Errorf("Expected to be able to get previous release")
-	}
-	if oldStatus := oldRelease.Info.Status.Code; oldStatus != release.Status_SUPERSEDED {
-		t.Errorf("Expected SUPERSEDED status on previous Release version. Got %v", oldStatus)
-	}
-}
-
-func TestRollbackReleaseFailure(t *testing.T) {
-	c := helm.NewContext()
-	rs := rsFixture()
-	rel := releaseStub()
-	rs.env.Releases.Create(rel)
-	upgradedRel := upgradeReleaseVersion(rel)
-	rs.env.Releases.Update(rel)
-	rs.env.Releases.Create(upgradedRel)
-
-	req := &services.RollbackReleaseRequest{
-		Name:         rel.Name,
-		DisableHooks: true,
-	}
-
-	rs.env.KubeClient = newUpdateFailingKubeClient()
-	res, err := rs.RollbackRelease(c, req)
-	if err == nil {
-		t.Error("Expected failed rollback")
-	}
-
-	if targetStatus := res.Release.Info.Status.Code; targetStatus != release.Status_FAILED {
-		t.Errorf("Expected FAILED release. Got %v", targetStatus)
-	}
-
-	oldRelease, err := rs.env.Releases.Get(rel.Name, rel.Version)
-	if err != nil {
-		t.Errorf("Expected to be able to get previous release")
-	}
-	if oldStatus := oldRelease.Info.Status.Code; oldStatus != release.Status_SUPERSEDED {
-		t.Errorf("Expected SUPERSEDED status on previous Release version. Got %v", oldStatus)
-	}
-}
-
-func TestUpdateReleaseNoHooks(t *testing.T) {
-	c := helm.NewContext()
-	rs := rsFixture()
-	rel := releaseStub()
-	rs.env.Releases.Create(rel)
-
-	req := &services.UpdateReleaseRequest{
-		Name:         rel.Name,
-		DisableHooks: true,
-		Chart: &chart.Chart{
-			Metadata: &chart.Metadata{Name: "hello"},
-			Templates: []*chart.Template{
-				{Name: "templates/hello", Data: []byte("hello: world")},
-				{Name: "templates/hooks", Data: []byte(manifestWithUpgradeHooks)},
-			},
-		},
-	}
-
-	res, err := rs.UpdateRelease(c, req)
-	if err != nil {
-		t.Fatalf("Failed updated: %s", err)
-	}
-
-	if hl := res.Release.Hooks[0].LastRun; hl != nil {
-		t.Errorf("Expected that no hooks were run. Got %d", hl)
-	}
-
-}
-
-func TestUpdateReleaseNoChanges(t *testing.T) {
-	c := helm.NewContext()
-	rs := rsFixture()
-	rel := releaseStub()
-	rs.env.Releases.Create(rel)
-
-	req := &services.UpdateReleaseRequest{
-		Name:         rel.Name,
-		DisableHooks: true,
-		Chart:        rel.GetChart(),
-	}
-
-	_, err := rs.UpdateRelease(c, req)
-	if err != nil {
-		t.Fatalf("Failed updated: %s", err)
-	}
-}
-
-func TestRollbackReleaseNoHooks(t *testing.T) {
-	c := helm.NewContext()
-	rs := rsFixture()
-	rel := releaseStub()
-	rel.Hooks = []*release.Hook{
-		{
-			Name:     "test-cm",
-			Kind:     "ConfigMap",
-			Path:     "test-cm",
-			Manifest: manifestWithRollbackHooks,
-			Events: []release.Hook_Event{
-				release.Hook_PRE_ROLLBACK,
-				release.Hook_POST_ROLLBACK,
-			},
-		},
-	}
-	rs.env.Releases.Create(rel)
-	upgradedRel := upgradeReleaseVersion(rel)
-	rs.env.Releases.Update(rel)
-	rs.env.Releases.Create(upgradedRel)
-
-	req := &services.RollbackReleaseRequest{
-		Name:         rel.Name,
-		DisableHooks: true,
-	}
-
-	res, err := rs.RollbackRelease(c, req)
-	if err != nil {
-		t.Fatalf("Failed rollback: %s", err)
-	}
-
-	if hl := res.Release.Hooks[0].LastRun; hl != nil {
-		t.Errorf("Expected that no hooks were run. Got %d", hl)
-	}
-}
-
-func TestRollbackWithReleaseVersion(t *testing.T) {
-	c := helm.NewContext()
-	rs := rsFixture()
-	rel := releaseStub()
-	rs.env.Releases.Create(rel)
-	upgradedRel := upgradeReleaseVersion(rel)
-	rs.env.Releases.Update(rel)
-	rs.env.Releases.Create(upgradedRel)
-
-	req := &services.RollbackReleaseRequest{
-		Name:         rel.Name,
-		DisableHooks: true,
-		Version:      1,
-	}
-
-	_, err := rs.RollbackRelease(c, req)
-	if err != nil {
-		t.Fatalf("Failed rollback: %s", err)
-	}
-}
-
-func TestRollbackRelease(t *testing.T) {
-	c := helm.NewContext()
-	rs := rsFixture()
-	rel := releaseStub()
-	rs.env.Releases.Create(rel)
-	upgradedRel := upgradeReleaseVersion(rel)
-	upgradedRel.Hooks = []*release.Hook{
-		{
-			Name:     "test-cm",
-			Kind:     "ConfigMap",
-			Path:     "test-cm",
-			Manifest: manifestWithRollbackHooks,
-			Events: []release.Hook_Event{
-				release.Hook_PRE_ROLLBACK,
-				release.Hook_POST_ROLLBACK,
-			},
-		},
-	}
-
-	upgradedRel.Manifest = "hello world"
-	rs.env.Releases.Update(rel)
-	rs.env.Releases.Create(upgradedRel)
-
-	req := &services.RollbackReleaseRequest{
-		Name: rel.Name,
-	}
-	res, err := rs.RollbackRelease(c, req)
-	if err != nil {
-		t.Fatalf("Failed rollback: %s", err)
-	}
-
-	if res.Release.Name == "" {
-		t.Errorf("Expected release name.")
-	}
-
-	if res.Release.Name != rel.Name {
-		t.Errorf("Updated release name does not match previous release name. Expected %s, got %s", rel.Name, res.Release.Name)
-	}
-
-	if res.Release.Namespace != rel.Namespace {
-		t.Errorf("Expected release namespace '%s', got '%s'.", rel.Namespace, res.Release.Namespace)
-	}
-
-	if res.Release.Version != 3 {
-		t.Errorf("Expected release version to be %v, got %v", 3, res.Release.Version)
-	}
-
-	updated, err := rs.env.Releases.Get(res.Release.Name, res.Release.Version)
-	if err != nil {
-		t.Errorf("Expected release for %s (%v).", res.Release.Name, rs.env.Releases)
-	}
-
-	if len(updated.Hooks) != 2 {
-		t.Fatalf("Expected 2 hooks, got %d", len(updated.Hooks))
-	}
-
-	if updated.Hooks[0].Manifest != manifestWithHook {
-		t.Errorf("Unexpected manifest: %v", updated.Hooks[0].Manifest)
-	}
-
-	anotherUpgradedRelease := upgradeReleaseVersion(upgradedRel)
-	rs.env.Releases.Update(upgradedRel)
-	rs.env.Releases.Create(anotherUpgradedRelease)
-
-	res, err = rs.RollbackRelease(c, req)
-	if err != nil {
-		t.Fatalf("Failed rollback: %s", err)
-	}
-
-	updated, err = rs.env.Releases.Get(res.Release.Name, res.Release.Version)
-	if err != nil {
-		t.Errorf("Expected release for %s (%v).", res.Release.Name, rs.env.Releases)
-	}
-
-	if len(updated.Hooks) != 1 {
-		t.Fatalf("Expected 1 hook, got %d", len(updated.Hooks))
-	}
-
-	if updated.Hooks[0].Manifest != manifestWithRollbackHooks {
-		t.Errorf("Unexpected manifest: %v", updated.Hooks[0].Manifest)
-	}
-
-	if res.Release.Version != 4 {
-		t.Errorf("Expected release version to be %v, got %v", 3, res.Release.Version)
-	}
-
-	if updated.Hooks[0].Events[0] != release.Hook_PRE_ROLLBACK {
-		t.Errorf("Expected event 0 to be pre rollback")
-	}
-
-	if updated.Hooks[0].Events[1] != release.Hook_POST_ROLLBACK {
-		t.Errorf("Expected event 1 to be post rollback")
-	}
-
-	if len(res.Release.Manifest) == 0 {
-		t.Errorf("No manifest returned: %v", res.Release)
-	}
-
-	if len(updated.Manifest) == 0 {
-		t.Errorf("Expected manifest in %v", res)
-	}
-
-	if !strings.Contains(updated.Manifest, "hello world") {
-		t.Errorf("unexpected output: %s", rel.Manifest)
-	}
-
-	if res.Release.Info.Description != "Rollback to 2" {
-		t.Errorf("Expected rollback to 2, got %q", res.Release.Info.Description)
-	}
-
-}
-
-func TestUninstallRelease(t *testing.T) {
-	c := helm.NewContext()
-	rs := rsFixture()
-	rs.env.Releases.Create(releaseStub())
-
-	req := &services.UninstallReleaseRequest{
-		Name: "angry-panda",
-	}
-
-	res, err := rs.UninstallRelease(c, req)
-	if err != nil {
-		t.Fatalf("Failed uninstall: %s", err)
-	}
-
-	if res.Release.Name != "angry-panda" {
-		t.Errorf("Expected angry-panda, got %q", res.Release.Name)
-	}
-
-	if res.Release.Info.Status.Code != release.Status_DELETED {
-		t.Errorf("Expected status code to be DELETED, got %d", res.Release.Info.Status.Code)
-	}
-
-	if res.Release.Hooks[0].LastRun.Seconds == 0 {
-		t.Error("Expected LastRun to be greater than zero.")
-	}
-
-	if res.Release.Info.Deleted.Seconds <= 0 {
-		t.Errorf("Expected valid UNIX date, got %d", res.Release.Info.Deleted.Seconds)
-	}
-
-	if res.Release.Info.Description != "Deletion complete" {
-		t.Errorf("Expected Deletion complete, got %q", res.Release.Info.Description)
-	}
-}
-
-func TestUninstallPurgeRelease(t *testing.T) {
-	c := helm.NewContext()
-	rs := rsFixture()
-	rel := releaseStub()
-	rs.env.Releases.Create(rel)
-	upgradedRel := upgradeReleaseVersion(rel)
-	rs.env.Releases.Update(rel)
-	rs.env.Releases.Create(upgradedRel)
-
-	req := &services.UninstallReleaseRequest{
-		Name:  "angry-panda",
-		Purge: true,
-	}
-
-	res, err := rs.UninstallRelease(c, req)
-	if err != nil {
-		t.Fatalf("Failed uninstall: %s", err)
-	}
-
-	if res.Release.Name != "angry-panda" {
-		t.Errorf("Expected angry-panda, got %q", res.Release.Name)
-	}
-
-	if res.Release.Info.Status.Code != release.Status_DELETED {
-		t.Errorf("Expected status code to be DELETED, got %d", res.Release.Info.Status.Code)
-	}
-
-	if res.Release.Info.Deleted.Seconds <= 0 {
-		t.Errorf("Expected valid UNIX date, got %d", res.Release.Info.Deleted.Seconds)
-	}
-	rels, err := rs.GetHistory(helm.NewContext(), &services.GetHistoryRequest{Name: "angry-panda"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(rels.Releases) != 0 {
-		t.Errorf("Expected no releases in storage, got %d", len(rels.Releases))
-	}
-}
-
-func TestUninstallPurgeDeleteRelease(t *testing.T) {
-	c := helm.NewContext()
-	rs := rsFixture()
-	rs.env.Releases.Create(releaseStub())
-
-	req := &services.UninstallReleaseRequest{
-		Name: "angry-panda",
-	}
-
-	_, err := rs.UninstallRelease(c, req)
-	if err != nil {
-		t.Fatalf("Failed uninstall: %s", err)
-	}
-
-	req2 := &services.UninstallReleaseRequest{
-		Name:  "angry-panda",
-		Purge: true,
-	}
-
-	_, err2 := rs.UninstallRelease(c, req2)
-	if err2 != nil && err2.Error() != "'angry-panda' has no deployed releases" {
-		t.Errorf("Failed uninstall: %s", err2)
-	}
-}
-
-func TestUninstallReleaseWithKeepPolicy(t *testing.T) {
-	c := helm.NewContext()
-	rs := rsFixture()
-	name := "angry-bunny"
-	rs.env.Releases.Create(releaseWithKeepStub(name))
-
-	req := &services.UninstallReleaseRequest{
-		Name: name,
-	}
-
-	res, err := rs.UninstallRelease(c, req)
-	if err != nil {
-		t.Fatalf("Failed uninstall: %s", err)
-	}
-
-	if res.Release.Name != name {
-		t.Errorf("Expected angry-bunny, got %q", res.Release.Name)
-	}
-
-	if res.Release.Info.Status.Code != release.Status_DELETED {
-		t.Errorf("Expected status code to be DELETED, got %d", res.Release.Info.Status.Code)
-	}
-
-	if res.Info == "" {
-		t.Errorf("Expected response info to not be empty")
-	} else {
-		if !strings.Contains(res.Info, "[ConfigMap] test-cm-keep") {
-			t.Errorf("unexpected output: %s", res.Info)
+	rel1 := releaseStub()
+	rel1.Name = "happy-panda"
+
+	rs.env.Releases.Create(rel1)
+
+	tests := []struct {
+		name   string
+		expect string
+		err    bool
+	}{
+		{"happy-panda", "ERROR", true},
+		{"wobbly-octopus", "[a-z]+-[a-z]+", false},
+	}
+
+	for _, tt := range tests {
+		m := NewFakeNamer(tt.name)
+		u, err := rs.createUniqName(m)
+		if err != nil {
+			if tt.err {
+				continue
+			}
+			t.Fatal(err)
+		}
+		if tt.err {
+			t.Errorf("Expected an error for %q", tt.name)
+		}
+		if match, err := regexp.MatchString(tt.expect, u); err != nil {
+			t.Fatal(err)
+		} else if !match {
+			t.Errorf("Expected %q to match %q", u, tt.expect)
 		}
 	}
+
 }
 
 func releaseWithKeepStub(rlsName string) *release.Release {
@@ -1255,309 +468,10 @@ func releaseWithKeepStub(rlsName string) *release.Release {
 	}
 }
 
-func TestUninstallReleaseNoHooks(t *testing.T) {
-	c := helm.NewContext()
-	rs := rsFixture()
-	rs.env.Releases.Create(releaseStub())
-
-	req := &services.UninstallReleaseRequest{
-		Name:         "angry-panda",
-		DisableHooks: true,
-	}
-
-	res, err := rs.UninstallRelease(c, req)
-	if err != nil {
-		t.Errorf("Failed uninstall: %s", err)
-	}
-
-	// The default value for a protobuf timestamp is nil.
-	if res.Release.Hooks[0].LastRun != nil {
-		t.Errorf("Expected LastRun to be zero, got %d.", res.Release.Hooks[0].LastRun.Seconds)
-	}
-}
-
-func TestGetReleaseContent(t *testing.T) {
-	c := helm.NewContext()
-	rs := rsFixture()
-	rel := releaseStub()
-	if err := rs.env.Releases.Create(rel); err != nil {
-		t.Fatalf("Could not store mock release: %s", err)
-	}
-
-	res, err := rs.GetReleaseContent(c, &services.GetReleaseContentRequest{Name: rel.Name, Version: 1})
-	if err != nil {
-		t.Errorf("Error getting release content: %s", err)
-	}
-
-	if res.Release.Chart.Metadata.Name != rel.Chart.Metadata.Name {
-		t.Errorf("Expected %q, got %q", rel.Chart.Metadata.Name, res.Release.Chart.Metadata.Name)
-	}
-}
-
-func TestGetReleaseStatus(t *testing.T) {
-	c := helm.NewContext()
-	rs := rsFixture()
-	rel := releaseStub()
-	if err := rs.env.Releases.Create(rel); err != nil {
-		t.Fatalf("Could not store mock release: %s", err)
-	}
-
-	res, err := rs.GetReleaseStatus(c, &services.GetReleaseStatusRequest{Name: rel.Name, Version: 1})
-	if err != nil {
-		t.Errorf("Error getting release content: %s", err)
-	}
-
-	if res.Name != rel.Name {
-		t.Errorf("Expected name %q, got %q", rel.Name, res.Name)
-	}
-	if res.Info.Status.Code != release.Status_DEPLOYED {
-		t.Errorf("Expected %d, got %d", release.Status_DEPLOYED, res.Info.Status.Code)
-	}
-}
-
-func TestGetReleaseStatusDeleted(t *testing.T) {
-	c := helm.NewContext()
-	rs := rsFixture()
-	rel := releaseStub()
-	rel.Info.Status.Code = release.Status_DELETED
-	if err := rs.env.Releases.Create(rel); err != nil {
-		t.Fatalf("Could not store mock release: %s", err)
-	}
-
-	res, err := rs.GetReleaseStatus(c, &services.GetReleaseStatusRequest{Name: rel.Name, Version: 1})
-	if err != nil {
-		t.Fatalf("Error getting release content: %s", err)
-	}
-
-	if res.Info.Status.Code != release.Status_DELETED {
-		t.Errorf("Expected %d, got %d", release.Status_DELETED, res.Info.Status.Code)
-	}
-}
-
-func TestListReleases(t *testing.T) {
-	rs := rsFixture()
-	num := 7
-	for i := 0; i < num; i++ {
-		rel := releaseStub()
-		rel.Name = fmt.Sprintf("rel-%d", i)
-		if err := rs.env.Releases.Create(rel); err != nil {
-			t.Fatalf("Could not store mock release: %s", err)
-		}
-	}
-
-	mrs := &mockListServer{}
-	if err := rs.ListReleases(&services.ListReleasesRequest{Offset: "", Limit: 64}, mrs); err != nil {
-		t.Fatalf("Failed listing: %s", err)
-	}
-
-	if len(mrs.val.Releases) != num {
-		t.Errorf("Expected %d releases, got %d", num, len(mrs.val.Releases))
-	}
-}
-
-func TestListReleasesByStatus(t *testing.T) {
-	rs := rsFixture()
-	stubs := []*release.Release{
-		namedReleaseStub("kamal", release.Status_DEPLOYED),
-		namedReleaseStub("astrolabe", release.Status_DELETED),
-		namedReleaseStub("octant", release.Status_FAILED),
-		namedReleaseStub("sextant", release.Status_UNKNOWN),
-	}
-	for _, stub := range stubs {
-		if err := rs.env.Releases.Create(stub); err != nil {
-			t.Fatalf("Could not create stub: %s", err)
-		}
-	}
-
-	tests := []struct {
-		statusCodes []release.Status_Code
-		names       []string
-	}{
-		{
-			names:       []string{"kamal"},
-			statusCodes: []release.Status_Code{release.Status_DEPLOYED},
-		},
-		{
-			names:       []string{"astrolabe"},
-			statusCodes: []release.Status_Code{release.Status_DELETED},
-		},
-		{
-			names:       []string{"kamal", "octant"},
-			statusCodes: []release.Status_Code{release.Status_DEPLOYED, release.Status_FAILED},
-		},
-		{
-			names: []string{"kamal", "astrolabe", "octant", "sextant"},
-			statusCodes: []release.Status_Code{
-				release.Status_DEPLOYED,
-				release.Status_DELETED,
-				release.Status_FAILED,
-				release.Status_UNKNOWN,
-			},
-		},
-	}
-
-	for i, tt := range tests {
-		mrs := &mockListServer{}
-		if err := rs.ListReleases(&services.ListReleasesRequest{StatusCodes: tt.statusCodes, Offset: "", Limit: 64}, mrs); err != nil {
-			t.Fatalf("Failed listing %d: %s", i, err)
-		}
-
-		if len(tt.names) != len(mrs.val.Releases) {
-			t.Fatalf("Expected %d releases, got %d", len(tt.names), len(mrs.val.Releases))
-		}
-
-		for _, name := range tt.names {
-			found := false
-			for _, rel := range mrs.val.Releases {
-				if rel.Name == name {
-					found = true
-				}
-			}
-			if !found {
-				t.Errorf("%d: Did not find name %q", i, name)
-			}
-		}
-	}
-}
-
-func TestListReleasesSort(t *testing.T) {
-	rs := rsFixture()
-
-	// Put them in by reverse order so that the mock doesn't "accidentally"
-	// sort.
-	num := 7
-	for i := num; i > 0; i-- {
-		rel := releaseStub()
-		rel.Name = fmt.Sprintf("rel-%d", i)
-		if err := rs.env.Releases.Create(rel); err != nil {
-			t.Fatalf("Could not store mock release: %s", err)
-		}
-	}
-
-	limit := 6
-	mrs := &mockListServer{}
-	req := &services.ListReleasesRequest{
-		Offset: "",
-		Limit:  int64(limit),
-		SortBy: services.ListSort_NAME,
-	}
-	if err := rs.ListReleases(req, mrs); err != nil {
-		t.Fatalf("Failed listing: %s", err)
-	}
-
-	if len(mrs.val.Releases) != limit {
-		t.Errorf("Expected %d releases, got %d", limit, len(mrs.val.Releases))
-	}
-
-	for i := 0; i < limit; i++ {
-		n := fmt.Sprintf("rel-%d", i+1)
-		if mrs.val.Releases[i].Name != n {
-			t.Errorf("Expected %q, got %q", n, mrs.val.Releases[i].Name)
-		}
-	}
-}
-
-func TestListReleasesFilter(t *testing.T) {
-	rs := rsFixture()
-	names := []string{
-		"axon",
-		"dendrite",
-		"neuron",
-		"neuroglia",
-		"synapse",
-		"nucleus",
-		"organelles",
-	}
-	num := 7
-	for i := 0; i < num; i++ {
-		rel := releaseStub()
-		rel.Name = names[i]
-		if err := rs.env.Releases.Create(rel); err != nil {
-			t.Fatalf("Could not store mock release: %s", err)
-		}
-	}
-
-	mrs := &mockListServer{}
-	req := &services.ListReleasesRequest{
-		Offset: "",
-		Limit:  64,
-		Filter: "neuro[a-z]+",
-		SortBy: services.ListSort_NAME,
-	}
-	if err := rs.ListReleases(req, mrs); err != nil {
-		t.Fatalf("Failed listing: %s", err)
-	}
-
-	if len(mrs.val.Releases) != 2 {
-		t.Errorf("Expected 2 releases, got %d", len(mrs.val.Releases))
-	}
-
-	if mrs.val.Releases[0].Name != "neuroglia" {
-		t.Errorf("Unexpected sort order: %v.", mrs.val.Releases)
-	}
-	if mrs.val.Releases[1].Name != "neuron" {
-		t.Errorf("Unexpected sort order: %v.", mrs.val.Releases)
-	}
-}
-
-func TestReleasesNamespace(t *testing.T) {
-	rs := rsFixture()
-
-	names := []string{
-		"axon",
-		"dendrite",
-		"neuron",
-		"ribosome",
-	}
-
-	namespaces := []string{
-		"default",
-		"test123",
-		"test123",
-		"cerebellum",
-	}
-	num := 4
-	for i := 0; i < num; i++ {
-		rel := releaseStub()
-		rel.Name = names[i]
-		rel.Namespace = namespaces[i]
-		if err := rs.env.Releases.Create(rel); err != nil {
-			t.Fatalf("Could not store mock release: %s", err)
-		}
-	}
-
-	mrs := &mockListServer{}
-	req := &services.ListReleasesRequest{
-		Offset:    "",
-		Limit:     64,
-		Namespace: "test123",
-	}
-
-	if err := rs.ListReleases(req, mrs); err != nil {
-		t.Fatalf("Failed listing: %s", err)
-	}
-
-	if len(mrs.val.Releases) != 2 {
-		t.Errorf("Expected 2 releases, got %d", len(mrs.val.Releases))
-	}
-}
-
-func TestRunReleaseTest(t *testing.T) {
-	rs := rsFixture()
-	rel := namedReleaseStub("nemo", release.Status_DEPLOYED)
-	rs.env.Releases.Create(rel)
-
-	req := &services.TestReleaseRequest{Name: "nemo", Timeout: 2}
-	err := rs.RunReleaseTest(req, mockRunReleaseTestServer{})
-	if err != nil {
-		t.Fatalf("failed to run release tests on %s: %s", rel.Name, err)
-	}
-}
-
 func MockEnvironment() *environment.Environment {
 	e := environment.New()
 	e.Releases = storage.Init(driver.NewMemory())
-	e.KubeClient = &environment.PrintingKubeClient{Out: os.Stdout}
+	e.KubeClient = &environment.PrintingKubeClient{Out: ioutil.Discard}
 	return e
 }
 
@@ -1572,13 +486,13 @@ type updateFailingKubeClient struct {
 	environment.PrintingKubeClient
 }
 
-func (u *updateFailingKubeClient) Update(namespace string, originalReader, modifiedReader io.Reader, recreate bool, timeout int64, shouldWait bool) error {
+func (u *updateFailingKubeClient) Update(namespace string, originalReader, modifiedReader io.Reader, force bool, recreate bool, timeout int64, shouldWait bool) error {
 	return errors.New("Failed update in kube client")
 }
 
 func newHookFailingKubeClient() *hookFailingKubeClient {
 	return &hookFailingKubeClient{
-		PrintingKubeClient: environment.PrintingKubeClient{Out: os.Stdout},
+		PrintingKubeClient: environment.PrintingKubeClient{Out: ioutil.Discard},
 	}
 }
 
@@ -1588,6 +502,20 @@ type hookFailingKubeClient struct {
 
 func (h *hookFailingKubeClient) WatchUntilReady(ns string, r io.Reader, timeout int64, shouldWait bool) error {
 	return errors.New("Failed watch")
+}
+
+func newDeleteFailingKubeClient() *deleteFailingKubeClient {
+	return &deleteFailingKubeClient{
+		PrintingKubeClient: environment.PrintingKubeClient{Out: ioutil.Discard},
+	}
+}
+
+type deleteFailingKubeClient struct {
+	environment.PrintingKubeClient
+}
+
+func (d *deleteFailingKubeClient) Delete(ns string, r io.Reader) error {
+	return kube.ErrNoObjectsVisited
 }
 
 type mockListServer struct {
@@ -1606,9 +534,7 @@ func (l *mockListServer) SendHeader(m metadata.MD) error { return nil }
 func (l *mockListServer) SetTrailer(m metadata.MD)       {}
 func (l *mockListServer) SetHeader(m metadata.MD) error  { return nil }
 
-type mockRunReleaseTestServer struct {
-	stream grpc.ServerStream
-}
+type mockRunReleaseTestServer struct{}
 
 func (rs mockRunReleaseTestServer) Send(m *services.TestReleaseResponse) error {
 	return nil
@@ -1619,3 +545,460 @@ func (rs mockRunReleaseTestServer) SetTrailer(m metadata.MD)       {}
 func (rs mockRunReleaseTestServer) SendMsg(v interface{}) error    { return nil }
 func (rs mockRunReleaseTestServer) RecvMsg(v interface{}) error    { return nil }
 func (rs mockRunReleaseTestServer) Context() context.Context       { return helm.NewContext() }
+
+type mockHooksManifest struct {
+	Metadata struct {
+		Name        string
+		Annotations map[string]string
+	}
+}
+type mockHooksKubeClient struct {
+	Resources map[string]*mockHooksManifest
+}
+
+var errResourceExists = errors.New("resource already exists")
+
+func (kc *mockHooksKubeClient) makeManifest(r io.Reader) (*mockHooksManifest, error) {
+	b, err := ioutil.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+
+	manifest := &mockHooksManifest{}
+	err = yaml.Unmarshal(b, manifest)
+	if err != nil {
+		return nil, err
+	}
+
+	return manifest, nil
+}
+func (kc *mockHooksKubeClient) Create(ns string, r io.Reader, timeout int64, shouldWait bool) error {
+	manifest, err := kc.makeManifest(r)
+	if err != nil {
+		return err
+	}
+
+	if _, hasKey := kc.Resources[manifest.Metadata.Name]; hasKey {
+		return errResourceExists
+	}
+
+	kc.Resources[manifest.Metadata.Name] = manifest
+
+	return nil
+}
+func (kc *mockHooksKubeClient) Get(ns string, r io.Reader) (string, error) {
+	return "", nil
+}
+func (kc *mockHooksKubeClient) Delete(ns string, r io.Reader) error {
+	manifest, err := kc.makeManifest(r)
+	if err != nil {
+		return err
+	}
+
+	delete(kc.Resources, manifest.Metadata.Name)
+
+	return nil
+}
+func (kc *mockHooksKubeClient) WatchUntilReady(ns string, r io.Reader, timeout int64, shouldWait bool) error {
+	paramManifest, err := kc.makeManifest(r)
+	if err != nil {
+		return err
+	}
+
+	manifest, hasManifest := kc.Resources[paramManifest.Metadata.Name]
+	if !hasManifest {
+		return fmt.Errorf("mockHooksKubeClient.WatchUntilReady: no such resource %s found", paramManifest.Metadata.Name)
+	}
+
+	if manifest.Metadata.Annotations["mockHooksKubeClient/Emulate"] == "hook-failed" {
+		return fmt.Errorf("mockHooksKubeClient.WatchUntilReady: hook-failed")
+	}
+
+	return nil
+}
+func (kc *mockHooksKubeClient) Update(ns string, currentReader, modifiedReader io.Reader, force bool, recreate bool, timeout int64, shouldWait bool) error {
+	return nil
+}
+func (kc *mockHooksKubeClient) Build(ns string, reader io.Reader) (kube.Result, error) {
+	return []*resource.Info{}, nil
+}
+func (kc *mockHooksKubeClient) BuildUnstructured(ns string, reader io.Reader) (kube.Result, error) {
+	return []*resource.Info{}, nil
+}
+func (kc *mockHooksKubeClient) WaitAndGetCompletedPodPhase(namespace string, reader io.Reader, timeout time.Duration) (v1.PodPhase, error) {
+	return v1.PodUnknown, nil
+}
+
+func deletePolicyStub(kubeClient *mockHooksKubeClient) *ReleaseServer {
+	e := environment.New()
+	e.Releases = storage.Init(driver.NewMemory())
+	e.KubeClient = kubeClient
+
+	clientset := fake.NewSimpleClientset()
+	return &ReleaseServer{
+		ReleaseModule: &LocalReleaseModule{
+			clientset: clientset,
+		},
+		env:       e,
+		clientset: clientset,
+		Log:       func(_ string, _ ...interface{}) {},
+	}
+}
+
+func deletePolicyHookStub(hookName string, extraAnnotations map[string]string, DeletePolicies []release.Hook_DeletePolicy) *release.Hook {
+	extraAnnotationsStr := ""
+	for k, v := range extraAnnotations {
+		extraAnnotationsStr += fmt.Sprintf("    \"%s\": \"%s\"\n", k, v)
+	}
+
+	return &release.Hook{
+		Name: hookName,
+		Kind: "Job",
+		Path: hookName,
+		Manifest: fmt.Sprintf(`kind: Job
+metadata:
+  name: %s
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+%sdata:
+name: value`, hookName, extraAnnotationsStr),
+		Events: []release.Hook_Event{
+			release.Hook_PRE_INSTALL,
+			release.Hook_PRE_UPGRADE,
+		},
+		DeletePolicies: DeletePolicies,
+	}
+}
+
+func execHookShouldSucceed(rs *ReleaseServer, hook *release.Hook, releaseName string, namespace string, hookType string) error {
+	err := rs.execHook([]*release.Hook{hook}, releaseName, namespace, hookType, 600)
+	if err != nil {
+		return fmt.Errorf("expected hook %s to be successful: %s", hook.Name, err)
+	}
+	return nil
+}
+
+func execHookShouldFail(rs *ReleaseServer, hook *release.Hook, releaseName string, namespace string, hookType string) error {
+	err := rs.execHook([]*release.Hook{hook}, releaseName, namespace, hookType, 600)
+	if err == nil {
+		return fmt.Errorf("expected hook %s to be failed", hook.Name)
+	}
+	return nil
+}
+
+func execHookShouldFailWithError(rs *ReleaseServer, hook *release.Hook, releaseName string, namespace string, hookType string, expectedError error) error {
+	err := rs.execHook([]*release.Hook{hook}, releaseName, namespace, hookType, 600)
+	if err != expectedError {
+		return fmt.Errorf("expected hook %s to fail with error %v, got %v", hook.Name, expectedError, err)
+	}
+	return nil
+}
+
+type deletePolicyContext struct {
+	ReleaseServer *ReleaseServer
+	ReleaseName   string
+	Namespace     string
+	HookName      string
+	KubeClient    *mockHooksKubeClient
+}
+
+func newDeletePolicyContext() *deletePolicyContext {
+	kubeClient := &mockHooksKubeClient{
+		Resources: make(map[string]*mockHooksManifest),
+	}
+
+	return &deletePolicyContext{
+		KubeClient:    kubeClient,
+		ReleaseServer: deletePolicyStub(kubeClient),
+		ReleaseName:   "flying-carp",
+		Namespace:     "river",
+		HookName:      "migration-job",
+	}
+}
+
+func TestSuccessfulHookWithoutDeletePolicy(t *testing.T) {
+	ctx := newDeletePolicyContext()
+	hook := deletePolicyHookStub(ctx.HookName, nil, nil)
+
+	err := execHookShouldSucceed(ctx.ReleaseServer, hook, ctx.ReleaseName, ctx.Namespace, hooks.PreInstall)
+	if err != nil {
+		t.Error(err)
+	}
+	if _, hasResource := ctx.KubeClient.Resources[hook.Name]; !hasResource {
+		t.Errorf("expected resource %s to be created by kube client", hook.Name)
+	}
+}
+
+func TestFailedHookWithoutDeletePolicy(t *testing.T) {
+	ctx := newDeletePolicyContext()
+	hook := deletePolicyHookStub(ctx.HookName,
+		map[string]string{"mockHooksKubeClient/Emulate": "hook-failed"},
+		nil,
+	)
+
+	err := execHookShouldFail(ctx.ReleaseServer, hook, ctx.ReleaseName, ctx.Namespace, hooks.PreInstall)
+	if err != nil {
+		t.Error(err)
+	}
+	if _, hasResource := ctx.KubeClient.Resources[hook.Name]; !hasResource {
+		t.Errorf("expected resource %s to be created by kube client", hook.Name)
+	}
+}
+
+func TestSuccessfulHookWithSucceededDeletePolicy(t *testing.T) {
+	ctx := newDeletePolicyContext()
+	hook := deletePolicyHookStub(ctx.HookName,
+		map[string]string{"helm.sh/hook-delete-policy": "hook-succeeded"},
+		[]release.Hook_DeletePolicy{release.Hook_SUCCEEDED},
+	)
+
+	err := execHookShouldSucceed(ctx.ReleaseServer, hook, ctx.ReleaseName, ctx.Namespace, hooks.PreInstall)
+	if err != nil {
+		t.Error(err)
+	}
+	if _, hasResource := ctx.KubeClient.Resources[hook.Name]; hasResource {
+		t.Errorf("expected resource %s to be unexisting after hook succeeded", hook.Name)
+	}
+}
+
+func TestSuccessfulHookWithFailedDeletePolicy(t *testing.T) {
+	ctx := newDeletePolicyContext()
+	hook := deletePolicyHookStub(ctx.HookName,
+		map[string]string{"helm.sh/hook-delete-policy": "hook-failed"},
+		[]release.Hook_DeletePolicy{release.Hook_FAILED},
+	)
+
+	err := execHookShouldSucceed(ctx.ReleaseServer, hook, ctx.ReleaseName, ctx.Namespace, hooks.PreInstall)
+	if err != nil {
+		t.Error(err)
+	}
+	if _, hasResource := ctx.KubeClient.Resources[hook.Name]; !hasResource {
+		t.Errorf("expected resource %s to be existing after hook succeeded", hook.Name)
+	}
+}
+
+func TestFailedHookWithSucceededDeletePolicy(t *testing.T) {
+	ctx := newDeletePolicyContext()
+
+	hook := deletePolicyHookStub(ctx.HookName,
+		map[string]string{
+			"mockHooksKubeClient/Emulate": "hook-failed",
+			"helm.sh/hook-delete-policy":  "hook-succeeded",
+		},
+		[]release.Hook_DeletePolicy{release.Hook_SUCCEEDED},
+	)
+
+	err := execHookShouldFail(ctx.ReleaseServer, hook, ctx.ReleaseName, ctx.Namespace, hooks.PreInstall)
+	if err != nil {
+		t.Error(err)
+	}
+	if _, hasResource := ctx.KubeClient.Resources[hook.Name]; !hasResource {
+		t.Errorf("expected resource %s to be existing after hook failed", hook.Name)
+	}
+}
+
+func TestFailedHookWithFailedDeletePolicy(t *testing.T) {
+	ctx := newDeletePolicyContext()
+
+	hook := deletePolicyHookStub(ctx.HookName,
+		map[string]string{
+			"mockHooksKubeClient/Emulate": "hook-failed",
+			"helm.sh/hook-delete-policy":  "hook-failed",
+		},
+		[]release.Hook_DeletePolicy{release.Hook_FAILED},
+	)
+
+	err := execHookShouldFail(ctx.ReleaseServer, hook, ctx.ReleaseName, ctx.Namespace, hooks.PreInstall)
+	if err != nil {
+		t.Error(err)
+	}
+	if _, hasResource := ctx.KubeClient.Resources[hook.Name]; hasResource {
+		t.Errorf("expected resource %s to be unexisting after hook failed", hook.Name)
+	}
+}
+
+func TestSuccessfulHookWithSuccededOrFailedDeletePolicy(t *testing.T) {
+	ctx := newDeletePolicyContext()
+
+	hook := deletePolicyHookStub(ctx.HookName,
+		map[string]string{
+			"helm.sh/hook-delete-policy": "hook-succeeded,hook-failed",
+		},
+		[]release.Hook_DeletePolicy{release.Hook_SUCCEEDED, release.Hook_FAILED},
+	)
+
+	err := execHookShouldSucceed(ctx.ReleaseServer, hook, ctx.ReleaseName, ctx.Namespace, hooks.PreInstall)
+	if err != nil {
+		t.Error(err)
+	}
+	if _, hasResource := ctx.KubeClient.Resources[hook.Name]; hasResource {
+		t.Errorf("expected resource %s to be unexisting after hook succeeded", hook.Name)
+	}
+}
+
+func TestFailedHookWithSuccededOrFailedDeletePolicy(t *testing.T) {
+	ctx := newDeletePolicyContext()
+
+	hook := deletePolicyHookStub(ctx.HookName,
+		map[string]string{
+			"mockHooksKubeClient/Emulate": "hook-failed",
+			"helm.sh/hook-delete-policy":  "hook-succeeded,hook-failed",
+		},
+		[]release.Hook_DeletePolicy{release.Hook_SUCCEEDED, release.Hook_FAILED},
+	)
+
+	err := execHookShouldFail(ctx.ReleaseServer, hook, ctx.ReleaseName, ctx.Namespace, hooks.PreInstall)
+	if err != nil {
+		t.Error(err)
+	}
+	if _, hasResource := ctx.KubeClient.Resources[hook.Name]; hasResource {
+		t.Errorf("expected resource %s to be unexisting after hook failed", hook.Name)
+	}
+}
+
+func TestHookAlreadyExists(t *testing.T) {
+	ctx := newDeletePolicyContext()
+
+	hook := deletePolicyHookStub(ctx.HookName, nil, nil)
+
+	err := execHookShouldSucceed(ctx.ReleaseServer, hook, ctx.ReleaseName, ctx.Namespace, hooks.PreInstall)
+	if err != nil {
+		t.Error(err)
+	}
+
+	if _, hasResource := ctx.KubeClient.Resources[hook.Name]; !hasResource {
+		t.Errorf("expected resource %s to be existing after hook succeeded", hook.Name)
+	}
+
+	err = execHookShouldFailWithError(ctx.ReleaseServer, hook, ctx.ReleaseName, ctx.Namespace, hooks.PreUpgrade, errResourceExists)
+	if err != nil {
+		t.Error(err)
+	}
+
+	if _, hasResource := ctx.KubeClient.Resources[hook.Name]; !hasResource {
+		t.Errorf("expected resource %s to be existing after already exists error", hook.Name)
+	}
+}
+
+func TestHookDeletingWithBeforeHookCreationDeletePolicy(t *testing.T) {
+	ctx := newDeletePolicyContext()
+
+	hook := deletePolicyHookStub(ctx.HookName,
+		map[string]string{"helm.sh/hook-delete-policy": "before-hook-creation"},
+		[]release.Hook_DeletePolicy{release.Hook_BEFORE_HOOK_CREATION},
+	)
+
+	err := execHookShouldSucceed(ctx.ReleaseServer, hook, ctx.ReleaseName, ctx.Namespace, hooks.PreInstall)
+	if err != nil {
+		t.Error(err)
+	}
+
+	if _, hasResource := ctx.KubeClient.Resources[hook.Name]; !hasResource {
+		t.Errorf("expected resource %s to be existing after hook succeeded", hook.Name)
+	}
+
+	err = execHookShouldSucceed(ctx.ReleaseServer, hook, ctx.ReleaseName, ctx.Namespace, hooks.PreUpgrade)
+	if err != nil {
+		t.Error(err)
+	}
+
+	if _, hasResource := ctx.KubeClient.Resources[hook.Name]; !hasResource {
+		t.Errorf("expected resource %s to be existing after hook succeeded", hook.Name)
+	}
+}
+
+func TestSuccessfulHookWithMixedDeletePolicies(t *testing.T) {
+	ctx := newDeletePolicyContext()
+
+	hook := deletePolicyHookStub(ctx.HookName,
+		map[string]string{
+			"helm.sh/hook-delete-policy": "hook-succeeded,before-hook-creation",
+		},
+		[]release.Hook_DeletePolicy{release.Hook_SUCCEEDED, release.Hook_BEFORE_HOOK_CREATION},
+	)
+
+	err := execHookShouldSucceed(ctx.ReleaseServer, hook, ctx.ReleaseName, ctx.Namespace, hooks.PreInstall)
+	if err != nil {
+		t.Error(err)
+	}
+
+	if _, hasResource := ctx.KubeClient.Resources[hook.Name]; hasResource {
+		t.Errorf("expected resource %s to be unexisting after hook succeeded", hook.Name)
+	}
+
+	err = execHookShouldSucceed(ctx.ReleaseServer, hook, ctx.ReleaseName, ctx.Namespace, hooks.PreUpgrade)
+	if err != nil {
+		t.Error(err)
+	}
+
+	if _, hasResource := ctx.KubeClient.Resources[hook.Name]; hasResource {
+		t.Errorf("expected resource %s to be unexisting after hook succeeded", hook.Name)
+	}
+}
+
+func TestFailedHookWithMixedDeletePolicies(t *testing.T) {
+	ctx := newDeletePolicyContext()
+
+	hook := deletePolicyHookStub(ctx.HookName,
+		map[string]string{
+			"mockHooksKubeClient/Emulate": "hook-failed",
+			"helm.sh/hook-delete-policy":  "hook-succeeded,before-hook-creation",
+		},
+		[]release.Hook_DeletePolicy{release.Hook_SUCCEEDED, release.Hook_BEFORE_HOOK_CREATION},
+	)
+
+	err := execHookShouldFail(ctx.ReleaseServer, hook, ctx.ReleaseName, ctx.Namespace, hooks.PreInstall)
+	if err != nil {
+		t.Error(err)
+	}
+
+	if _, hasResource := ctx.KubeClient.Resources[hook.Name]; !hasResource {
+		t.Errorf("expected resource %s to be existing after hook failed", hook.Name)
+	}
+
+	err = execHookShouldFail(ctx.ReleaseServer, hook, ctx.ReleaseName, ctx.Namespace, hooks.PreUpgrade)
+	if err != nil {
+		t.Error(err)
+	}
+
+	if _, hasResource := ctx.KubeClient.Resources[hook.Name]; !hasResource {
+		t.Errorf("expected resource %s to be existing after hook failed", hook.Name)
+	}
+}
+
+func TestFailedThenSuccessfulHookWithMixedDeletePolicies(t *testing.T) {
+	ctx := newDeletePolicyContext()
+
+	hook := deletePolicyHookStub(ctx.HookName,
+		map[string]string{
+			"mockHooksKubeClient/Emulate": "hook-failed",
+			"helm.sh/hook-delete-policy":  "hook-succeeded,before-hook-creation",
+		},
+		[]release.Hook_DeletePolicy{release.Hook_SUCCEEDED, release.Hook_BEFORE_HOOK_CREATION},
+	)
+
+	err := execHookShouldFail(ctx.ReleaseServer, hook, ctx.ReleaseName, ctx.Namespace, hooks.PreInstall)
+	if err != nil {
+		t.Error(err)
+	}
+
+	if _, hasResource := ctx.KubeClient.Resources[hook.Name]; !hasResource {
+		t.Errorf("expected resource %s to be existing after hook failed", hook.Name)
+	}
+
+	hook = deletePolicyHookStub(ctx.HookName,
+		map[string]string{
+			"helm.sh/hook-delete-policy": "hook-succeeded,before-hook-creation",
+		},
+		[]release.Hook_DeletePolicy{release.Hook_SUCCEEDED, release.Hook_BEFORE_HOOK_CREATION},
+	)
+
+	err = execHookShouldSucceed(ctx.ReleaseServer, hook, ctx.ReleaseName, ctx.Namespace, hooks.PreUpgrade)
+	if err != nil {
+		t.Error(err)
+	}
+
+	if _, hasResource := ctx.KubeClient.Resources[hook.Name]; hasResource {
+		t.Errorf("expected resource %s to be unexisting after hook succeeded", hook.Name)
+	}
+}

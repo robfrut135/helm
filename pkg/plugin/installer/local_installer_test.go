@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -31,7 +31,7 @@ func TestLocalInstaller(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(hh)
+	defer os.RemoveAll(hh)
 
 	home := helmpath.Home(hh)
 	if err := os.MkdirAll(home.Plugins(), 0755); err != nil {
@@ -43,7 +43,7 @@ func TestLocalInstaller(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(tdir)
+	defer os.RemoveAll(tdir)
 	if err := ioutil.WriteFile(filepath.Join(tdir, "plugin.yaml"), []byte{}, 0644); err != nil {
 		t.Fatal(err)
 	}

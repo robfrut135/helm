@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,7 +19,9 @@ package engine
 import (
 	"bytes"
 	"fmt"
+	"log"
 	"path"
+	"sort"
 	"strings"
 	"text/template"
 
@@ -37,6 +39,8 @@ type Engine struct {
 	// If strict is enabled, template rendering will fail if a template references
 	// a value that was not passed in.
 	Strict bool
+	// In LintMode, some 'required' template values may be missing, so don't fail
+	LintMode bool
 }
 
 // New creates a new Go template Engine instance.
@@ -64,7 +68,9 @@ func New() *Engine {
 //	- "include": This is late-bound in Engine.Render(). The version
 //	   included in the FuncMap is a placeholder.
 //      - "required": This is late-bound in Engine.Render(). The version
-//	   included in thhe FuncMap is a placeholder.
+//	   included in the FuncMap is a placeholder.
+//      - "tpl": This is late-bound in Engine.Render(). The version
+//	   included in the FuncMap is a placeholder.
 func FuncMap() template.FuncMap {
 	f := sprig.TxtFuncMap()
 	delete(f, "env")
@@ -83,6 +89,7 @@ func FuncMap() template.FuncMap {
 		// integrity of the linter.
 		"include":  func(string, interface{}) string { return "not implemented" },
 		"required": func(string, interface{}) interface{} { return "not implemented" },
+		"tpl":      func(string, interface{}) interface{} { return "not implemented" },
 	}
 
 	for k, v := range extra {
@@ -123,14 +130,14 @@ type renderable struct {
 	tpl string
 	// vals are the values to be supplied to the template.
 	vals chartutil.Values
-	// namespace prefix to the templates of the current chart
+	// basePath namespace prefix to the templates of the current chart
 	basePath string
 }
 
 // alterFuncMap takes the Engine's FuncMap and adds context-specific functions.
 //
 // The resulting FuncMap is only valid for the passed-in template.
-func (e *Engine) alterFuncMap(t *template.Template) template.FuncMap {
+func (e *Engine) alterFuncMap(t *template.Template, referenceTpls map[string]renderable) template.FuncMap {
 	// Clone the func map because we are adding context-specific functions.
 	var funcMap template.FuncMap = map[string]interface{}{}
 	for k, v := range e.FuncMap {
@@ -138,31 +145,76 @@ func (e *Engine) alterFuncMap(t *template.Template) template.FuncMap {
 	}
 
 	// Add the 'include' function here so we can close over t.
-	funcMap["include"] = func(name string, data interface{}) string {
+	funcMap["include"] = func(name string, data interface{}) (string, error) {
 		buf := bytes.NewBuffer(nil)
 		if err := t.ExecuteTemplate(buf, name, data); err != nil {
-			buf.WriteString(err.Error())
+			return "", err
 		}
-		return buf.String()
+		return buf.String(), nil
 	}
 
 	// Add the 'required' function here
 	funcMap["required"] = func(warn string, val interface{}) (interface{}, error) {
 		if val == nil {
-			return val, fmt.Errorf(warn)
+			if e.LintMode {
+				// Don't fail on missing required values when linting
+				log.Printf("[INFO] Missing required value: %s", warn)
+				return "", nil
+			}
+			// Convert nil to "" in case required is piped into other functions
+			return "", fmt.Errorf(warn)
 		} else if _, ok := val.(string); ok {
 			if val == "" {
+				if e.LintMode {
+					// Don't fail on missing required values when linting
+					log.Printf("[INFO] Missing required value: %s", warn)
+					return val, nil
+				}
 				return val, fmt.Errorf(warn)
 			}
 		}
 		return val, nil
 	}
 
+	// Add the 'tpl' function here
+	funcMap["tpl"] = func(tpl string, vals chartutil.Values) (string, error) {
+		basePath, err := vals.PathValue("Template.BasePath")
+		if err != nil {
+			return "", fmt.Errorf("Cannot retrieve Template.Basepath from values inside tpl function: %s (%s)", tpl, err.Error())
+		}
+
+		r := renderable{
+			tpl:      tpl,
+			vals:     vals,
+			basePath: basePath.(string),
+		}
+
+		templates := map[string]renderable{}
+		templateName, err := vals.PathValue("Template.Name")
+		if err != nil {
+			return "", fmt.Errorf("Cannot retrieve Template.Name from values inside tpl function: %s (%s)", tpl, err.Error())
+		}
+
+		templates[templateName.(string)] = r
+
+		result, err := e.renderWithReferences(templates, referenceTpls)
+		if err != nil {
+			return "", fmt.Errorf("Error during tpl function execution for %q: %s", tpl, err.Error())
+		}
+		return result[templateName.(string)], nil
+	}
+
 	return funcMap
 }
 
 // render takes a map of templates/values and renders them.
-func (e *Engine) render(tpls map[string]renderable) (map[string]string, error) {
+func (e *Engine) render(tpls map[string]renderable) (rendered map[string]string, err error) {
+	return e.renderWithReferences(tpls, tpls)
+}
+
+// renderWithReferences takes a map of templates/values to render, and a map of
+// templates which can be referenced within them.
+func (e *Engine) renderWithReferences(tpls map[string]renderable, referenceTpls map[string]renderable) (rendered map[string]string, err error) {
 	// Basically, what we do here is start with an empty parent template and then
 	// build up a list of templates -- one for each file. Once all of the templates
 	// have been parsed, we loop through again and execute every template.
@@ -170,6 +222,11 @@ func (e *Engine) render(tpls map[string]renderable) (map[string]string, error) {
 	// The idea with this process is to make it possible for more complex templates
 	// to share common blocks, but to make the entire thing feel like a file-based
 	// template engine.
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("rendering template failed: %v", r)
+		}
+	}()
 	t := template.New("gotpl")
 	if e.Strict {
 		t.Option("missingkey=error")
@@ -179,10 +236,16 @@ func (e *Engine) render(tpls map[string]renderable) (map[string]string, error) {
 		t.Option("missingkey=zero")
 	}
 
-	funcMap := e.alterFuncMap(t)
+	funcMap := e.alterFuncMap(t, referenceTpls)
+
+	// We want to parse the templates in a predictable order. The order favors
+	// higher-level (in file system) templates over deeply nested templates.
+	keys := sortTemplates(tpls)
 
 	files := []string{}
-	for fname, r := range tpls {
+
+	for _, fname := range keys {
+		r := tpls[fname]
 		t = t.New(fname).Funcs(funcMap)
 		if _, err := t.Parse(r.tpl); err != nil {
 			return map[string]string{}, fmt.Errorf("parse error in %q: %s", fname, err)
@@ -190,9 +253,25 @@ func (e *Engine) render(tpls map[string]renderable) (map[string]string, error) {
 		files = append(files, fname)
 	}
 
-	rendered := make(map[string]string, len(files))
+	// Adding the reference templates to the template context
+	// so they can be referenced in the tpl function
+	for fname, r := range referenceTpls {
+		if t.Lookup(fname) == nil {
+			t = t.New(fname).Funcs(funcMap)
+			if _, err := t.Parse(r.tpl); err != nil {
+				return map[string]string{}, fmt.Errorf("parse error in %q: %s", fname, err)
+			}
+		}
+	}
+
+	rendered = make(map[string]string, len(files))
 	var buf bytes.Buffer
 	for _, file := range files {
+		// Don't render partials. We don't care out the direct output of partials.
+		// They are only included from other templates.
+		if strings.HasPrefix(path.Base(file), "_") {
+			continue
+		}
 		// At render time, add information about the template that is being rendered.
 		vals := tpls[file].vals
 		vals["Template"] = map[string]interface{}{"Name": file, "BasePath": tpls[file].basePath}
@@ -208,6 +287,30 @@ func (e *Engine) render(tpls map[string]renderable) (map[string]string, error) {
 	}
 
 	return rendered, nil
+}
+
+func sortTemplates(tpls map[string]renderable) []string {
+	keys := make([]string, len(tpls))
+	i := 0
+	for key := range tpls {
+		keys[i] = key
+		i++
+	}
+	sort.Sort(sort.Reverse(byPathLen(keys)))
+	return keys
+}
+
+type byPathLen []string
+
+func (p byPathLen) Len() int      { return len(p) }
+func (p byPathLen) Swap(i, j int) { p[j], p[i] = p[i], p[j] }
+func (p byPathLen) Less(i, j int) bool {
+	a, b := p[i], p[j]
+	ca, cb := strings.Count(a, "/"), strings.Count(b, "/")
+	if ca == cb {
+		return strings.Compare(a, b) == -1
+	}
+	return ca < cb
 }
 
 // allTemplates returns all templates for a chart and its dependencies.

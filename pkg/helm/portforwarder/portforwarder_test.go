@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,68 +19,120 @@ package portforwarder
 import (
 	"testing"
 
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/fake"
+	"k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
-func mockTillerPod() api.Pod {
-	return api.Pod{
-		ObjectMeta: api.ObjectMeta{
+func mockTillerPod() v1.Pod {
+	return v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
 			Name:      "orca",
-			Namespace: api.NamespaceDefault,
-			Labels:    map[string]string{"app": "helm", "name": "tiller"},
+			Namespace: v1.NamespaceDefault,
+			Labels:    tillerPodLabels,
 		},
-		Status: api.PodStatus{
-			Phase: api.PodRunning,
-			Conditions: []api.PodCondition{
+		Status: v1.PodStatus{
+			Phase: v1.PodRunning,
+			Conditions: []v1.PodCondition{
 				{
-					Status: api.ConditionTrue,
-					Type:   api.PodReady,
+					Status: v1.ConditionTrue,
+					Type:   v1.PodReady,
 				},
 			},
 		},
 	}
 }
 
-func mockTillerPodPending() api.Pod {
+func mockTillerPodPending() v1.Pod {
 	p := mockTillerPod()
 	p.Name = "blue"
-	p.Status.Conditions[0].Status = api.ConditionFalse
+	p.Status.Conditions[0].Status = v1.ConditionFalse
 	return p
 }
 
 func TestGetFirstPod(t *testing.T) {
 	tests := []struct {
 		name     string
-		pods     []api.Pod
+		pods     []v1.Pod
 		expected string
 		err      bool
 	}{
 		{
 			name:     "with a ready pod",
-			pods:     []api.Pod{mockTillerPod()},
+			pods:     []v1.Pod{mockTillerPod()},
 			expected: "orca",
 		},
 		{
 			name: "without a ready pod",
-			pods: []api.Pod{mockTillerPodPending()},
+			pods: []v1.Pod{mockTillerPodPending()},
 			err:  true,
 		},
 		{
 			name: "without a pod",
-			pods: []api.Pod{},
+			pods: []v1.Pod{},
 			err:  true,
 		},
 	}
 
 	for _, tt := range tests {
-		client := fake.NewSimpleClientset(&api.PodList{Items: tt.pods})
-		name, err := getTillerPodName(client.Core(), api.NamespaceDefault)
+		client := fake.NewSimpleClientset(&v1.PodList{Items: tt.pods})
+		name, err := GetTillerPodName(client.CoreV1(), v1.NamespaceDefault)
 		if (err != nil) != tt.err {
 			t.Errorf("%q. expected error: %v, got %v", tt.name, tt.err, err)
 		}
 		if name != tt.expected {
 			t.Errorf("%q. expected %q, got %q", tt.name, tt.expected, name)
 		}
+	}
+}
+
+func TestGetTillerPodImage(t *testing.T) {
+	tests := []struct {
+		name     string
+		podSpec  v1.PodSpec
+		expected string
+		err      bool
+	}{
+		{
+			name: "pod with tiller container image",
+			podSpec: v1.PodSpec{
+				Containers: []v1.Container{
+					{
+						Name:  "tiller",
+						Image: "gcr.io/kubernetes-helm/tiller:v2.0.0",
+					},
+				},
+			},
+			expected: "gcr.io/kubernetes-helm/tiller:v2.0.0",
+			err:      false,
+		},
+		{
+			name: "pod without tiller container image",
+			podSpec: v1.PodSpec{
+				Containers: []v1.Container{
+					{
+						Name:  "not_tiller",
+						Image: "gcr.io/kubernetes-helm/not_tiller:v1.0.0",
+					},
+				},
+			},
+			expected: "",
+			err:      true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockPod := mockTillerPod()
+			mockPod.Spec = tt.podSpec
+			client := fake.NewSimpleClientset(&v1.PodList{Items: []v1.Pod{mockPod}})
+			imageName, err := GetTillerPodImage(client.CoreV1(), v1.NamespaceDefault)
+			if (err != nil) != tt.err {
+				t.Errorf("%q. expected error: %v, got %v", tt.name, tt.err, err)
+			}
+			if imageName != tt.expected {
+				t.Errorf("%q. expected %q, got %q", tt.name, tt.expected, imageName)
+			}
+		})
 	}
 }

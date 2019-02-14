@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ package helm
 
 import (
 	"crypto/tls"
+	"time"
 
 	"github.com/golang/protobuf/proto"
 	"golang.org/x/net/context"
@@ -46,8 +47,12 @@ type options struct {
 	reuseName bool
 	// if set, performs pod restart during upgrade/rollback
 	recreate bool
+	// if set, force resource update through delete/recreate if needed
+	force bool
 	// if set, skip running hooks
 	disableHooks bool
+	// if set, skip CRD hook only
+	disableCRDHook bool
 	// name of release
 	releaseName string
 	// tls.Config to use for rpc if tls enabled
@@ -76,6 +81,8 @@ type options struct {
 	reuseValues bool
 	// release test options are applied directly to the test release history request
 	testReq rls.TestReleaseRequest
+	// connectTimeout specifies the time duration Helm will wait to establish a connection to tiller
+	connectTimeout time.Duration
 }
 
 // Host specifies the host address of the Tiller release server, (default = ":44134").
@@ -178,6 +185,13 @@ func ReleaseName(name string) InstallOption {
 	}
 }
 
+// ConnectTimeout specifies the duration (in seconds) Helm will wait to establish a connection to tiller
+func ConnectTimeout(timeout int64) Option {
+	return func(opts *options) {
+		opts.connectTimeout = time.Duration(timeout) * time.Second
+	}
+}
+
 // InstallTimeout specifies the number of seconds before kubernetes calls timeout
 func InstallTimeout(timeout int64) InstallOption {
 	return func(opts *options) {
@@ -210,6 +224,13 @@ func ReleaseTestTimeout(timeout int64) ReleaseTestOption {
 func ReleaseTestCleanup(cleanup bool) ReleaseTestOption {
 	return func(opts *options) {
 		opts.testReq.Cleanup = cleanup
+	}
+}
+
+// ReleaseTestParallel is a boolean value representing whether to run test pods in parallel
+func ReleaseTestParallel(parallel bool) ReleaseTestOption {
+	return func(opts *options) {
+		opts.testReq.Parallel = parallel
 	}
 }
 
@@ -248,6 +269,34 @@ func UpdateValueOverrides(raw []byte) UpdateOption {
 	}
 }
 
+// InstallDescription specifies the description for the release
+func InstallDescription(description string) InstallOption {
+	return func(opts *options) {
+		opts.instReq.Description = description
+	}
+}
+
+// UpgradeDescription specifies the description for the update
+func UpgradeDescription(description string) UpdateOption {
+	return func(opts *options) {
+		opts.updateReq.Description = description
+	}
+}
+
+// RollbackDescription specifies the description for the release
+func RollbackDescription(description string) RollbackOption {
+	return func(opts *options) {
+		opts.rollbackReq.Description = description
+	}
+}
+
+// DeleteDescription specifies the description for the release
+func DeleteDescription(description string) DeleteOption {
+	return func(opts *options) {
+		opts.uninstallReq.Description = description
+	}
+}
+
 // DeleteDisableHooks will disable hooks for a deletion operation.
 func DeleteDisableHooks(disable bool) DeleteOption {
 	return func(opts *options) {
@@ -283,10 +332,31 @@ func InstallDisableHooks(disable bool) InstallOption {
 	}
 }
 
+// InstallDisableCRDHook disables CRD hook during installation.
+func InstallDisableCRDHook(disable bool) InstallOption {
+	return func(opts *options) {
+		opts.disableCRDHook = disable
+	}
+}
+
 // InstallReuseName will (if true) instruct Tiller to re-use an existing name.
 func InstallReuseName(reuse bool) InstallOption {
 	return func(opts *options) {
 		opts.reuseName = reuse
+	}
+}
+
+// InstallSubNotes will (if true) instruct Tiller to render SubChart Notes
+func InstallSubNotes(enable bool) InstallOption {
+	return func(opts *options) {
+		opts.instReq.SubNotes = enable
+	}
+}
+
+// UpgradeSubNotes will (if true) instruct Tiller to render SubChart Notes
+func UpgradeSubNotes(enable bool) UpdateOption {
+	return func(opts *options) {
+		opts.updateReq.SubNotes = enable
 	}
 }
 
@@ -308,6 +378,13 @@ func RollbackDryRun(dry bool) RollbackOption {
 func RollbackRecreate(recreate bool) RollbackOption {
 	return func(opts *options) {
 		opts.recreate = recreate
+	}
+}
+
+// RollbackForce will (if true) force resource update through delete/recreate if needed
+func RollbackForce(force bool) RollbackOption {
+	return func(opts *options) {
+		opts.force = force
 	}
 }
 
@@ -339,7 +416,8 @@ func ResetValues(reset bool) UpdateOption {
 	}
 }
 
-// ReuseValues will (if true) trigger resetting the values to their original state.
+// ReuseValues will cause Tiller to reuse the values from the last release.
+// This is ignored if ResetValues is true.
 func ReuseValues(reuse bool) UpdateOption {
 	return func(opts *options) {
 		opts.reuseValues = reuse
@@ -353,12 +431,19 @@ func UpgradeRecreate(recreate bool) UpdateOption {
 	}
 }
 
+// UpgradeForce will (if true) force resource update through delete/recreate if needed
+func UpgradeForce(force bool) UpdateOption {
+	return func(opts *options) {
+		opts.force = force
+	}
+}
+
 // ContentOption allows setting optional attributes when
 // performing a GetReleaseContent tiller rpc.
 type ContentOption func(*options)
 
 // ContentReleaseVersion will instruct Tiller to retrieve the content
-// of a paritcular version of a release.
+// of a particular version of a release.
 func ContentReleaseVersion(version int32) ContentOption {
 	return func(opts *options) {
 		opts.contentReq.Version = version
@@ -389,7 +474,7 @@ type VersionOption func(*options)
 // the defaults used when running the `helm upgrade` command.
 type UpdateOption func(*options)
 
-// RollbackOption allows specififying various settings configurable
+// RollbackOption allows specifying various settings configurable
 // by the helm client user for overriding the defaults used when
 // running the `helm rollback` command.
 type RollbackOption func(*options)
@@ -408,8 +493,8 @@ func WithMaxHistory(max int32) HistoryOption {
 
 // NewContext creates a versioned context.
 func NewContext() context.Context {
-	md := metadata.Pairs("x-helm-api-client", version.Version)
-	return metadata.NewContext(context.TODO(), md)
+	md := metadata.Pairs("x-helm-api-client", version.GetVersion())
+	return metadata.NewOutgoingContext(context.TODO(), md)
 }
 
 // ReleaseTestOption allows configuring optional request data for

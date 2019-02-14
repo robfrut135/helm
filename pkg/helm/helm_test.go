@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,8 +18,10 @@ package helm // import "k8s.io/helm/pkg/helm"
 
 import (
 	"errors"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/golang/protobuf/proto"
@@ -31,13 +33,13 @@ import (
 	tpb "k8s.io/helm/pkg/proto/hapi/services"
 )
 
-// path to example charts relative to pkg/helm.
+// Path to example charts relative to pkg/helm.
 const chartsDir = "../../docs/examples/"
 
-// sentinel error to indicate to the helm client to not send the request to tiller.
+// Sentinel error to indicate to the Helm client to not send the request to Tiller.
 var errSkip = errors.New("test: skip")
 
-// Verify ReleaseListOption's are applied to a ListReleasesRequest correctly.
+// Verify each ReleaseListOption is applied to a ListReleasesRequest correctly.
 func TestListReleases_VerifyOptions(t *testing.T) {
 	// Options testdata
 	var limit = 2
@@ -75,7 +77,7 @@ func TestListReleases_VerifyOptions(t *testing.T) {
 		ReleaseListNamespace(namespace),
 	}
 
-	// BeforeCall option to intercept helm client ListReleasesRequest
+	// BeforeCall option to intercept Helm client ListReleasesRequest
 	b4c := BeforeCall(func(_ context.Context, msg proto.Message) error {
 		switch act := msg.(type) {
 		case *tpb.ListReleasesRequest:
@@ -87,12 +89,17 @@ func TestListReleases_VerifyOptions(t *testing.T) {
 		return errSkip
 	})
 
-	if _, err := NewClient(b4c).ListReleases(ops...); err != errSkip {
+	client := NewClient(b4c)
+
+	if _, err := client.ListReleases(ops...); err != errSkip {
 		t.Fatalf("did not expect error but got (%v)\n``", err)
 	}
+
+	// ensure options for call are not saved to client
+	assert(t, "", client.opts.listReq.Filter)
 }
 
-// Verify InstallOption's are applied to an InstallReleaseRequest correctly.
+// Verify each InstallOption is applied to an InstallReleaseRequest correctly.
 func TestInstallRelease_VerifyOptions(t *testing.T) {
 	// Options testdata
 	var disableHooks = true
@@ -124,7 +131,7 @@ func TestInstallRelease_VerifyOptions(t *testing.T) {
 		InstallDisableHooks(disableHooks),
 	}
 
-	// BeforeCall option to intercept helm client InstallReleaseRequest
+	// BeforeCall option to intercept Helm client InstallReleaseRequest
 	b4c := BeforeCall(func(_ context.Context, msg proto.Message) error {
 		switch act := msg.(type) {
 		case *tpb.InstallReleaseRequest:
@@ -136,12 +143,16 @@ func TestInstallRelease_VerifyOptions(t *testing.T) {
 		return errSkip
 	})
 
-	if _, err := NewClient(b4c).InstallRelease(chartPath, namespace, ops...); err != errSkip {
+	client := NewClient(b4c)
+	if _, err := client.InstallRelease(chartPath, namespace, ops...); err != errSkip {
 		t.Fatalf("did not expect error but got (%v)\n``", err)
 	}
+
+	// ensure options for call are not saved to client
+	assert(t, "", client.opts.instReq.Name)
 }
 
-// Verify DeleteOptions's are applied to an UninstallReleaseRequest correctly.
+// Verify each DeleteOptions is applied to an UninstallReleaseRequest correctly.
 func TestDeleteRelease_VerifyOptions(t *testing.T) {
 	// Options testdata
 	var releaseName = "test"
@@ -161,7 +172,7 @@ func TestDeleteRelease_VerifyOptions(t *testing.T) {
 		DeleteDisableHooks(disableHooks),
 	}
 
-	// BeforeCall option to intercept helm client DeleteReleaseRequest
+	// BeforeCall option to intercept Helm client DeleteReleaseRequest
 	b4c := BeforeCall(func(_ context.Context, msg proto.Message) error {
 		switch act := msg.(type) {
 		case *tpb.UninstallReleaseRequest:
@@ -173,12 +184,16 @@ func TestDeleteRelease_VerifyOptions(t *testing.T) {
 		return errSkip
 	})
 
-	if _, err := NewClient(b4c).DeleteRelease(releaseName, ops...); err != errSkip {
+	client := NewClient(b4c)
+	if _, err := client.DeleteRelease(releaseName, ops...); err != errSkip {
 		t.Fatalf("did not expect error but got (%v)\n``", err)
 	}
+
+	// ensure options for call are not saved to client
+	assert(t, "", client.opts.uninstallReq.Name)
 }
 
-// Verify UpdateOption's are applied to an UpdateReleaseRequest correctly.
+// Verify each UpdateOption is applied to an UpdateReleaseRequest correctly.
 func TestUpdateRelease_VerifyOptions(t *testing.T) {
 	// Options testdata
 	var chartName = "alpine"
@@ -204,7 +219,7 @@ func TestUpdateRelease_VerifyOptions(t *testing.T) {
 		UpgradeDisableHooks(disableHooks),
 	}
 
-	// BeforeCall option to intercept helm client UpdateReleaseRequest
+	// BeforeCall option to intercept Helm client UpdateReleaseRequest
 	b4c := BeforeCall(func(_ context.Context, msg proto.Message) error {
 		switch act := msg.(type) {
 		case *tpb.UpdateReleaseRequest:
@@ -216,12 +231,16 @@ func TestUpdateRelease_VerifyOptions(t *testing.T) {
 		return errSkip
 	})
 
-	if _, err := NewClient(b4c).UpdateRelease(releaseName, chartPath, ops...); err != errSkip {
+	client := NewClient(b4c)
+	if _, err := client.UpdateRelease(releaseName, chartPath, ops...); err != errSkip {
 		t.Fatalf("did not expect error but got (%v)\n``", err)
 	}
+
+	// ensure options for call are not saved to client
+	assert(t, "", client.opts.updateReq.Name)
 }
 
-// Verify RollbackOption's are applied to a RollbackReleaseRequest correctly.
+// Verify each RollbackOption is applied to a RollbackReleaseRequest correctly.
 func TestRollbackRelease_VerifyOptions(t *testing.T) {
 	// Options testdata
 	var disableHooks = true
@@ -244,7 +263,7 @@ func TestRollbackRelease_VerifyOptions(t *testing.T) {
 		RollbackDisableHooks(disableHooks),
 	}
 
-	// BeforeCall option to intercept helm client RollbackReleaseRequest
+	// BeforeCall option to intercept Helm client RollbackReleaseRequest
 	b4c := BeforeCall(func(_ context.Context, msg proto.Message) error {
 		switch act := msg.(type) {
 		case *tpb.RollbackReleaseRequest:
@@ -256,12 +275,16 @@ func TestRollbackRelease_VerifyOptions(t *testing.T) {
 		return errSkip
 	})
 
-	if _, err := NewClient(b4c).RollbackRelease(releaseName, ops...); err != errSkip {
+	client := NewClient(b4c)
+	if _, err := client.RollbackRelease(releaseName, ops...); err != errSkip {
 		t.Fatalf("did not expect error but got (%v)\n``", err)
 	}
+
+	// ensure options for call are not saved to client
+	assert(t, "", client.opts.rollbackReq.Name)
 }
 
-// Verify StatusOption's are applied to a GetReleaseStatusRequest correctly.
+// Verify each StatusOption is applied to a GetReleaseStatusRequest correctly.
 func TestReleaseStatus_VerifyOptions(t *testing.T) {
 	// Options testdata
 	var releaseName = "test"
@@ -273,7 +296,7 @@ func TestReleaseStatus_VerifyOptions(t *testing.T) {
 		Version: revision,
 	}
 
-	// BeforeCall option to intercept helm client GetReleaseStatusRequest
+	// BeforeCall option to intercept Helm client GetReleaseStatusRequest
 	b4c := BeforeCall(func(_ context.Context, msg proto.Message) error {
 		switch act := msg.(type) {
 		case *tpb.GetReleaseStatusRequest:
@@ -285,12 +308,16 @@ func TestReleaseStatus_VerifyOptions(t *testing.T) {
 		return errSkip
 	})
 
-	if _, err := NewClient(b4c).ReleaseStatus(releaseName, StatusReleaseVersion(revision)); err != errSkip {
+	client := NewClient(b4c)
+	if _, err := client.ReleaseStatus(releaseName, StatusReleaseVersion(revision)); err != errSkip {
 		t.Fatalf("did not expect error but got (%v)\n``", err)
 	}
+
+	// ensure options for call are not saved to client
+	assert(t, "", client.opts.statusReq.Name)
 }
 
-// Verify ContentOption's are applied to a GetReleaseContentRequest correctly.
+// Verify each ContentOption is applied to a GetReleaseContentRequest correctly.
 func TestReleaseContent_VerifyOptions(t *testing.T) {
 	// Options testdata
 	var releaseName = "test"
@@ -302,7 +329,7 @@ func TestReleaseContent_VerifyOptions(t *testing.T) {
 		Version: revision,
 	}
 
-	// BeforeCall option to intercept helm client GetReleaseContentRequest
+	// BeforeCall option to intercept Helm client GetReleaseContentRequest
 	b4c := BeforeCall(func(_ context.Context, msg proto.Message) error {
 		switch act := msg.(type) {
 		case *tpb.GetReleaseContentRequest:
@@ -314,9 +341,13 @@ func TestReleaseContent_VerifyOptions(t *testing.T) {
 		return errSkip
 	})
 
-	if _, err := NewClient(b4c).ReleaseContent(releaseName, ContentReleaseVersion(revision)); err != errSkip {
+	client := NewClient(b4c)
+	if _, err := client.ReleaseContent(releaseName, ContentReleaseVersion(revision)); err != errSkip {
 		t.Fatalf("did not expect error but got (%v)\n``", err)
 	}
+
+	// ensure options for call are not saved to client
+	assert(t, "", client.opts.contentReq.Name)
 }
 
 func assert(t *testing.T, expect, actual interface{}) {
@@ -331,4 +362,16 @@ func loadChart(t *testing.T, name string) *cpb.Chart {
 		t.Fatalf("failed to load test chart (%q): %s\n", name, err)
 	}
 	return c
+}
+
+func TestDoesNotImportKubernetes(t *testing.T) {
+	cmd := exec.Command("go", "list", "-f", "{{.Deps}}", ".")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Failed to execute %s %s: %s", cmd.Path, strings.Join(cmd.Args, " "), err)
+	}
+
+	if strings.Contains(string(output), "k8s.io/kubernetes") {
+		t.Fatal("k8s.io/helm/pkg/helm contains a dependency on k8s.io/kubernetes. See https://github.com/helm/helm/pull/4499 for more details.")
+	}
 }

@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -27,12 +27,15 @@ import (
 type Options struct {
 	CaCertFile string
 	// If either the KeyFile or CertFile is empty, ClientConfig() will not load them,
-	// preventing helm from authenticating to Tiller. They are required to be non-empty
+	// preventing Helm from authenticating to Tiller. They are required to be non-empty
 	// when calling ServerConfig, otherwise an error is returned.
 	KeyFile  string
 	CertFile string
 	// Client-only options
 	InsecureSkipVerify bool
+	// Overrides the server name used to verify the hostname on the returned
+	// certificates from the server.
+	ServerName string
 	// Server-only options
 	ClientAuth tls.ClientAuthType
 }
@@ -44,7 +47,10 @@ func ClientConfig(opts Options) (cfg *tls.Config, err error) {
 
 	if opts.CertFile != "" || opts.KeyFile != "" {
 		if cert, err = CertFromFilePair(opts.CertFile, opts.KeyFile); err != nil {
-			return nil, fmt.Errorf("could not load x509 key pair (cert: %q, key: %q): %v", opts.CertFile, opts.KeyFile, err)
+			if os.IsNotExist(err) {
+				return nil, fmt.Errorf("could not load x509 key pair (cert: %q, key: %q): %v", opts.CertFile, opts.KeyFile, err)
+			}
+			return nil, fmt.Errorf("could not read x509 key pair (cert: %q, key: %q): %v", opts.CertFile, opts.KeyFile, err)
 		}
 	}
 	if !opts.InsecureSkipVerify && opts.CaCertFile != "" {
@@ -52,8 +58,12 @@ func ClientConfig(opts Options) (cfg *tls.Config, err error) {
 			return nil, err
 		}
 	}
-
-	cfg = &tls.Config{InsecureSkipVerify: opts.InsecureSkipVerify, Certificates: []tls.Certificate{*cert}, RootCAs: pool}
+	cfg = &tls.Config{
+		InsecureSkipVerify: opts.InsecureSkipVerify,
+		Certificates:       []tls.Certificate{*cert},
+		ServerName:         opts.ServerName,
+		RootCAs:            pool,
+	}
 	return cfg, nil
 }
 

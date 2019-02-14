@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -36,7 +36,7 @@ func newPluginListCmd(out io.Writer) *cobra.Command {
 		Use:   "list",
 		Short: "list installed Helm plugins",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			pcmd.home = helmpath.Home(homePath())
+			pcmd.home = settings.Home
 			return pcmd.run()
 		},
 	}
@@ -44,11 +44,8 @@ func newPluginListCmd(out io.Writer) *cobra.Command {
 }
 
 func (pcmd *pluginListCmd) run() error {
-	plugdirs := pluginDirs(pcmd.home)
-
-	debug("pluginDirs: %s", plugdirs)
-
-	plugins, err := findPlugins(plugdirs)
+	debug("pluginDirs: %s", settings.PluginDirs())
+	plugins, err := findPlugins(settings.PluginDirs())
 	if err != nil {
 		return err
 	}

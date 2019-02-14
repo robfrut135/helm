@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -35,21 +35,22 @@ import (
 //
 // The caller is responsible for destroying the temp directory as well as stopping
 // the server.
-func NewTempServer(glob string) (*Server, string, error) {
+func NewTempServer(glob string) (*Server, helmpath.Home, error) {
 	tdir, err := ioutil.TempDir("", "helm-repotest-")
+	tdirh := helmpath.Home(tdir)
 	if err != nil {
-		return nil, tdir, err
+		return nil, tdirh, err
 	}
 	srv := NewServer(tdir)
 
 	if glob != "" {
 		if _, err := srv.CopyCharts(glob); err != nil {
 			srv.Stop()
-			return srv, tdir, err
+			return srv, tdirh, err
 		}
 	}
 
-	return srv, tdir, nil
+	return srv, tdirh, nil
 }
 
 // NewServer creates a repository server for testing.
@@ -147,7 +148,7 @@ func (s *Server) URL() string {
 	return s.srv.URL
 }
 
-// LinkIndices links the index created with CreateIndex and makes a symboic link to the repositories/cache directory.
+// LinkIndices links the index created with CreateIndex and makes a symbolic link to the repositories/cache directory.
 //
 // This makes it possible to simulate a local cache of a repository.
 func (s *Server) LinkIndices() error {

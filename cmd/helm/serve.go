@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,7 +24,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"k8s.io/helm/pkg/helm/helmpath"
 	"k8s.io/helm/pkg/repo"
 )
 
@@ -34,6 +33,13 @@ This command starts a local chart repository server that serves charts from a lo
 The new server will provide HTTP access to a repository. By default, it will
 scan all of the charts in '$HELM_HOME/repository/local' and serve those over
 the local IPv4 TCP port (default '127.0.0.1:8879').
+
+This command is intended to be used for educational and testing purposes only.
+It is best to rely on a dedicated web server or a cloud-hosted solution like
+Google Cloud Storage for production use.
+
+See https://github.com/helm/helm/blob/master/docs/chart_repository.md#hosting-chart-repositories
+for more information on hosting chart repositories in a production setting.
 `
 
 type serveCmd struct {
@@ -49,17 +55,27 @@ func newServeCmd(out io.Writer) *cobra.Command {
 		Use:   "serve",
 		Short: "start a local http web server",
 		Long:  serveDesc,
+		PreRunE: func(cmd *cobra.Command, args []string) error {
+			return srv.complete()
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return srv.run()
 		},
 	}
 
 	f := cmd.Flags()
-	f.StringVar(&srv.repoPath, "repo-path", helmpath.Home(homePath()).LocalRepository(), "local directory path from which to serve charts")
+	f.StringVar(&srv.repoPath, "repo-path", "", "local directory path from which to serve charts")
 	f.StringVar(&srv.address, "address", "127.0.0.1:8879", "address to listen on")
 	f.StringVar(&srv.url, "url", "", "external URL of chart repository")
 
 	return cmd
+}
+
+func (s *serveCmd) complete() error {
+	if s.repoPath == "" {
+		s.repoPath = settings.Home.LocalRepository()
+	}
+	return nil
 }
 
 func (s *serveCmd) run() error {

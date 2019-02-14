@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ limitations under the License.
 package driver
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -158,11 +159,38 @@ func TestMemoryDelete(t *testing.T) {
 	}
 
 	ts := tsFixtureMemory(t)
+	start, err := ts.Query(map[string]string{"NAME": "rls-a"})
+	if err != nil {
+		t.Errorf("Query failed: %s", err)
+	}
+	startLen := len(start)
 	for _, tt := range tests {
-		if _, err := ts.Delete(tt.key); err != nil {
+		if rel, err := ts.Delete(tt.key); err != nil {
 			if !tt.err {
 				t.Fatalf("Failed %q to get '%s': %q\n", tt.desc, tt.key, err)
 			}
+			continue
+		} else if fmt.Sprintf("%s.v%d", rel.Name, rel.Version) != tt.key {
+			t.Fatalf("Asked for delete on %s, but deleted %d", tt.key, rel.Version)
+		}
+		_, err := ts.Get(tt.key)
+		if err == nil {
+			t.Errorf("Expected an error when asking for a deleted key")
 		}
 	}
+
+	// Make sure that the deleted records are gone.
+	end, err := ts.Query(map[string]string{"NAME": "rls-a"})
+	if err != nil {
+		t.Errorf("Query failed: %s", err)
+	}
+	endLen := len(end)
+
+	if startLen <= endLen {
+		t.Errorf("expected start %d to be less than end %d", startLen, endLen)
+		for _, ee := range end {
+			t.Logf("Name: %s, Version: %d", ee.Name, ee.Version)
+		}
+	}
+
 }

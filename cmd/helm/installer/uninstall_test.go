@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,150 +18,71 @@ package installer // import "k8s.io/helm/cmd/helm/installer"
 
 import (
 	"testing"
-	"time"
 
-	"k8s.io/kubernetes/pkg/api"
-	apierrors "k8s.io/kubernetes/pkg/api/errors"
-	"k8s.io/kubernetes/pkg/api/meta"
-	"k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/fake"
-	testcore "k8s.io/kubernetes/pkg/client/testing/core"
-	"k8s.io/kubernetes/pkg/kubectl"
-	cmdtesting "k8s.io/kubernetes/pkg/kubectl/cmd/testing"
-	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
-	"k8s.io/kubernetes/pkg/runtime"
-
-	"k8s.io/helm/pkg/kube"
+	"k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/kubernetes/fake"
+	testcore "k8s.io/client-go/testing"
 )
 
-type fakeReaper struct {
-	namespace string
-	name      string
-}
-
-func (r *fakeReaper) Stop(namespace, name string, timeout time.Duration, gracePeriod *api.DeleteOptions) error {
-	r.namespace = namespace
-	r.name = name
-	return nil
-}
-
-type fakeReaperFactory struct {
-	cmdutil.Factory
-	reaper kubectl.Reaper
-}
-
-func (f *fakeReaperFactory) Reaper(mapping *meta.RESTMapping) (kubectl.Reaper, error) {
-	return f.reaper, nil
-}
-
 func TestUninstall(t *testing.T) {
-	existingService := service(api.NamespaceDefault)
-	existingDeployment := deployment(&Options{
-		Namespace: api.NamespaceDefault,
-		ImageSpec: "image",
-		UseCanary: false,
-	})
-
 	fc := &fake.Clientset{}
-	fc.AddReactor("get", "services", func(action testcore.Action) (bool, runtime.Object, error) {
-		return true, existingService, nil
-	})
-	fc.AddReactor("delete", "services", func(action testcore.Action) (bool, runtime.Object, error) {
-		return true, nil, nil
-	})
-	fc.AddReactor("get", "deployments", func(action testcore.Action) (bool, runtime.Object, error) {
-		return true, existingDeployment, nil
-	})
-
-	f, _, _, _ := cmdtesting.NewAPIFactory()
-	r := &fakeReaper{}
-	rf := &fakeReaperFactory{Factory: f, reaper: r}
-	kc := &kube.Client{Factory: rf}
-
-	opts := &Options{Namespace: api.NamespaceDefault}
-	if err := Uninstall(fc, kc, opts); err != nil {
+	opts := &Options{Namespace: v1.NamespaceDefault}
+	if err := Uninstall(fc, opts); err != nil {
 		t.Errorf("unexpected error: %#+v", err)
 	}
 
 	if actions := fc.Actions(); len(actions) != 3 {
 		t.Errorf("unexpected actions: %v, expected 3 actions got %d", actions, len(actions))
-	}
-
-	if r.namespace != api.NamespaceDefault {
-		t.Errorf("unexpected reaper namespace: %s", r.name)
-	}
-
-	if r.name != "tiller-deploy" {
-		t.Errorf("unexpected reaper name: %s", r.name)
 	}
 }
 
 func TestUninstall_serviceNotFound(t *testing.T) {
-	existingDeployment := deployment(&Options{Namespace: api.NamespaceDefault, ImageSpec: "imageToReplace", UseCanary: false})
-
 	fc := &fake.Clientset{}
-	fc.AddReactor("get", "services", func(action testcore.Action) (bool, runtime.Object, error) {
-		return true, nil, apierrors.NewNotFound(api.Resource("services"), "1")
-	})
-	fc.AddReactor("get", "deployments", func(action testcore.Action) (bool, runtime.Object, error) {
-		return true, existingDeployment, nil
-	})
-
-	f, _, _, _ := cmdtesting.NewAPIFactory()
-	r := &fakeReaper{}
-	rf := &fakeReaperFactory{Factory: f, reaper: r}
-	kc := &kube.Client{Factory: rf}
-
-	opts := &Options{Namespace: api.NamespaceDefault}
-	if err := Uninstall(fc, kc, opts); err != nil {
-		t.Errorf("unexpected error: %#+v", err)
-	}
-
-	if actions := fc.Actions(); len(actions) != 2 {
-		t.Errorf("unexpected actions: %v, expected 2 actions got %d", actions, len(actions))
-	}
-
-	if r.namespace != api.NamespaceDefault {
-		t.Errorf("unexpected reaper namespace: %s", r.name)
-	}
-
-	if r.name != "tiller-deploy" {
-		t.Errorf("unexpected reaper name: %s", r.name)
-	}
-}
-
-func TestUninstall_deploymentNotFound(t *testing.T) {
-	existingService := service(api.NamespaceDefault)
-
-	fc := &fake.Clientset{}
-	fc.AddReactor("get", "services", func(action testcore.Action) (bool, runtime.Object, error) {
-		return true, existingService, nil
-	})
 	fc.AddReactor("delete", "services", func(action testcore.Action) (bool, runtime.Object, error) {
-		return true, nil, nil
-	})
-	fc.AddReactor("get", "deployments", func(action testcore.Action) (bool, runtime.Object, error) {
-		return true, nil, apierrors.NewNotFound(api.Resource("deployments"), "1")
+		return true, nil, apierrors.NewNotFound(schema.GroupResource{Resource: "services"}, "1")
 	})
 
-	f, _, _, _ := cmdtesting.NewAPIFactory()
-	r := &fakeReaper{}
-	rf := &fakeReaperFactory{Factory: f, reaper: r}
-	kc := &kube.Client{Factory: rf}
-
-	opts := &Options{Namespace: api.NamespaceDefault}
-	if err := Uninstall(fc, kc, opts); err != nil {
+	opts := &Options{Namespace: v1.NamespaceDefault}
+	if err := Uninstall(fc, opts); err != nil {
 		t.Errorf("unexpected error: %#+v", err)
 	}
 
 	if actions := fc.Actions(); len(actions) != 3 {
 		t.Errorf("unexpected actions: %v, expected 3 actions got %d", actions, len(actions))
 	}
+}
 
-	if r.namespace != "" {
-		t.Errorf("unexpected reaper namespace: %s", r.name)
+func TestUninstall_deploymentNotFound(t *testing.T) {
+	fc := &fake.Clientset{}
+	fc.AddReactor("delete", "deployments", func(action testcore.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewNotFound(schema.GroupResource{Resource: "deployments"}, "1")
+	})
+
+	opts := &Options{Namespace: v1.NamespaceDefault}
+	if err := Uninstall(fc, opts); err != nil {
+		t.Errorf("unexpected error: %#+v", err)
 	}
 
-	if r.name != "" {
-		t.Errorf("unexpected reaper name: %s", r.name)
+	if actions := fc.Actions(); len(actions) != 3 {
+		t.Errorf("unexpected actions: %v, expected 3 actions got %d", actions, len(actions))
+	}
+}
+
+func TestUninstall_secretNotFound(t *testing.T) {
+	fc := &fake.Clientset{}
+	fc.AddReactor("delete", "secrets", func(action testcore.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewNotFound(schema.GroupResource{Resource: "secrets"}, "1")
+	})
+
+	opts := &Options{Namespace: v1.NamespaceDefault}
+	if err := Uninstall(fc, opts); err != nil {
+		t.Errorf("unexpected error: %#+v", err)
+	}
+
+	if actions := fc.Actions(); len(actions) != 3 {
+		t.Errorf("unexpected actions: %v, expect 3 actions got %d", actions, len(actions))
 	}
 }

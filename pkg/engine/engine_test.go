@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -27,6 +27,37 @@ import (
 	"github.com/golang/protobuf/ptypes/any"
 )
 
+func TestSortTemplates(t *testing.T) {
+	tpls := map[string]renderable{
+		"/mychart/templates/foo.tpl":                                 {},
+		"/mychart/templates/charts/foo/charts/bar/templates/foo.tpl": {},
+		"/mychart/templates/bar.tpl":                                 {},
+		"/mychart/templates/charts/foo/templates/bar.tpl":            {},
+		"/mychart/templates/_foo.tpl":                                {},
+		"/mychart/templates/charts/foo/templates/foo.tpl":            {},
+		"/mychart/templates/charts/bar/templates/foo.tpl":            {},
+	}
+	got := sortTemplates(tpls)
+	if len(got) != len(tpls) {
+		t.Fatal("Sorted results are missing templates")
+	}
+
+	expect := []string{
+		"/mychart/templates/charts/foo/charts/bar/templates/foo.tpl",
+		"/mychart/templates/charts/foo/templates/foo.tpl",
+		"/mychart/templates/charts/foo/templates/bar.tpl",
+		"/mychart/templates/charts/bar/templates/foo.tpl",
+		"/mychart/templates/foo.tpl",
+		"/mychart/templates/bar.tpl",
+		"/mychart/templates/_foo.tpl",
+	}
+	for i, e := range expect {
+		if got[i] != e {
+			t.Errorf("expected %q, got %q at index %d\n\tExp: %#v\n\tGot: %#v", e, got[i], i, expect, got)
+		}
+	}
+}
+
 func TestEngine(t *testing.T) {
 	e := New()
 
@@ -49,7 +80,7 @@ func TestFuncMap(t *testing.T) {
 	}
 
 	// Test for Engine-specific template functions.
-	expect := []string{"include", "required", "toYaml", "fromYaml", "toToml", "toJson", "fromJson"}
+	expect := []string{"include", "required", "tpl", "toYaml", "fromYaml", "toToml", "toJson", "fromJson"}
 	for _, f := range expect {
 		if _, ok := fns[f]; !ok {
 			t.Errorf("Expected add-on function %q", f)
@@ -435,7 +466,6 @@ func TestAlterFuncMap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	expectStr := "All your base are belong to us"
 	if gotStr := outReq["conan/templates/quote"]; gotStr != expectStr {
 		t.Errorf("Expected %q, got %q (%v)", expectStr, gotStr, outReq)
@@ -443,6 +473,119 @@ func TestAlterFuncMap(t *testing.T) {
 	expectNum := "All 2 of them!"
 	if gotNum := outReq["conan/templates/bases"]; gotNum != expectNum {
 		t.Errorf("Expected %q, got %q (%v)", expectNum, gotNum, outReq)
+	}
+
+	// test required without passing in needed values with lint mode on
+	// verifies lint replaces required with an empty string (should not fail)
+	lintValues := chartutil.Values{
+		"Values": chartutil.Values{
+			"who": "us",
+		},
+		"Chart": reqChart.Metadata,
+		"Release": chartutil.Values{
+			"Name": "That 90s meme",
+		},
+	}
+	e := New()
+	e.LintMode = true
+	outReq, err = e.Render(reqChart, lintValues)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectStr = "All your base are belong to us"
+	if gotStr := outReq["conan/templates/quote"]; gotStr != expectStr {
+		t.Errorf("Expected %q, got %q (%v)", expectStr, gotStr, outReq)
+	}
+	expectNum = "All  of them!"
+	if gotNum := outReq["conan/templates/bases"]; gotNum != expectNum {
+		t.Errorf("Expected %q, got %q (%v)", expectNum, gotNum, outReq)
+	}
+
+	tplChart := &chart.Chart{
+		Metadata: &chart.Metadata{Name: "TplFunction"},
+		Templates: []*chart.Template{
+			{Name: "templates/base", Data: []byte(`Evaluate tpl {{tpl "Value: {{ .Values.value}}" .}}`)},
+		},
+		Values:       &chart.Config{Raw: ``},
+		Dependencies: []*chart.Chart{},
+	}
+
+	tplValues := chartutil.Values{
+		"Values": chartutil.Values{
+			"value": "myvalue",
+		},
+		"Chart": tplChart.Metadata,
+		"Release": chartutil.Values{
+			"Name": "TestRelease",
+		},
+	}
+
+	outTpl, err := New().Render(tplChart, tplValues)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expectTplStr := "Evaluate tpl Value: myvalue"
+	if gotStrTpl := outTpl["TplFunction/templates/base"]; gotStrTpl != expectTplStr {
+		t.Errorf("Expected %q, got %q (%v)", expectTplStr, gotStrTpl, outTpl)
+	}
+
+	tplChartWithFunction := &chart.Chart{
+		Metadata: &chart.Metadata{Name: "TplFunction"},
+		Templates: []*chart.Template{
+			{Name: "templates/base", Data: []byte(`Evaluate tpl {{tpl "Value: {{ .Values.value | quote}}" .}}`)},
+		},
+		Values:       &chart.Config{Raw: ``},
+		Dependencies: []*chart.Chart{},
+	}
+
+	tplValuesWithFunction := chartutil.Values{
+		"Values": chartutil.Values{
+			"value": "myvalue",
+		},
+		"Chart": tplChartWithFunction.Metadata,
+		"Release": chartutil.Values{
+			"Name": "TestRelease",
+		},
+	}
+
+	outTplWithFunction, err := New().Render(tplChartWithFunction, tplValuesWithFunction)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expectTplStrWithFunction := "Evaluate tpl Value: \"myvalue\""
+	if gotStrTplWithFunction := outTplWithFunction["TplFunction/templates/base"]; gotStrTplWithFunction != expectTplStrWithFunction {
+		t.Errorf("Expected %q, got %q (%v)", expectTplStrWithFunction, gotStrTplWithFunction, outTplWithFunction)
+	}
+
+	tplChartWithInclude := &chart.Chart{
+		Metadata: &chart.Metadata{Name: "TplFunction"},
+		Templates: []*chart.Template{
+			{Name: "templates/base", Data: []byte(`{{ tpl "{{include ` + "`" + `TplFunction/templates/_partial` + "`" + ` .  | quote }}" .}}`)},
+			{Name: "templates/_partial", Data: []byte(`{{.Template.Name}}`)},
+		},
+		Values:       &chart.Config{Raw: ``},
+		Dependencies: []*chart.Chart{},
+	}
+	tplValueWithInclude := chartutil.Values{
+		"Values": chartutil.Values{
+			"value": "myvalue",
+		},
+		"Chart": tplChartWithInclude.Metadata,
+		"Release": chartutil.Values{
+			"Name": "TestRelease",
+		},
+	}
+
+	outTplWithInclude, err := New().Render(tplChartWithInclude, tplValueWithInclude)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expectedTplStrWithInclude := "\"TplFunction/templates/base\""
+	if gotStrTplWithInclude := outTplWithInclude["TplFunction/templates/base"]; gotStrTplWithInclude != expectedTplStrWithInclude {
+		t.Errorf("Expected %q, got %q (%v)", expectedTplStrWithInclude, gotStrTplWithInclude, outTplWithInclude)
 	}
 
 }

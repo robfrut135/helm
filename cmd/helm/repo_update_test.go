@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -23,6 +23,7 @@ import (
 	"strings"
 	"testing"
 
+	"k8s.io/helm/pkg/getter"
 	"k8s.io/helm/pkg/helm/helmpath"
 	"k8s.io/helm/pkg/repo"
 	"k8s.io/helm/pkg/repo/repotest"
@@ -33,20 +34,23 @@ func TestUpdateCmd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldhome := homePath()
-	helmHome = thome
+
+	cleanup := resetEnv()
 	defer func() {
-		helmHome = oldhome
-		os.Remove(thome)
+		os.RemoveAll(thome.String())
+		cleanup()
 	}()
+
+	settings.Home = thome
 
 	out := bytes.NewBuffer(nil)
 	// Instead of using the HTTP updater, we provide our own for this test.
 	// The TestUpdateCharts test verifies the HTTP behavior independently.
-	updater := func(repos []*repo.ChartRepository, out io.Writer, hh helmpath.Home) {
+	updater := func(repos []*repo.ChartRepository, out io.Writer, hh helmpath.Home, strict bool) error {
 		for _, re := range repos {
 			fmt.Fprintln(out, re.Config.Name)
 		}
+		return nil
 	}
 	uc := &repoUpdateCmd{
 		update: updater,
@@ -68,29 +72,30 @@ func TestUpdateCharts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	oldhome := homePath()
-	helmHome = thome
 	hh := helmpath.Home(thome)
+	cleanup := resetEnv()
 	defer func() {
 		ts.Stop()
-		helmHome = oldhome
-		os.Remove(thome)
+		os.RemoveAll(thome.String())
+		cleanup()
 	}()
 	if err := ensureTestHome(hh, t); err != nil {
 		t.Fatal(err)
 	}
 
+	settings.Home = thome
+
 	r, err := repo.NewChartRepository(&repo.Entry{
 		Name:  "charts",
 		URL:   ts.URL(),
 		Cache: hh.CacheIndex("charts"),
-	})
+	}, getter.All(settings))
 	if err != nil {
 		t.Error(err)
 	}
 
 	b := bytes.NewBuffer(nil)
-	updateCharts([]*repo.ChartRepository{r}, b, hh)
+	updateCharts([]*repo.ChartRepository{r}, b, hh, false)
 
 	got := b.String()
 	if strings.Contains(got, "Unable to get an update") {
@@ -98,5 +103,32 @@ func TestUpdateCharts(t *testing.T) {
 	}
 	if !strings.Contains(got, "Update Complete.") {
 		t.Error("Update was not successful")
+	}
+}
+
+func TestUpdateCmdStrictFlag(t *testing.T) {
+	thome, err := tempHelmHome(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cleanup := resetEnv()
+	defer func() {
+		os.RemoveAll(thome.String())
+		cleanup()
+	}()
+
+	settings.Home = thome
+
+	out := bytes.NewBuffer(nil)
+	cmd := newRepoUpdateCmd(out)
+	cmd.ParseFlags([]string{"--strict"})
+
+	if err := cmd.RunE(cmd, []string{}); err == nil {
+		t.Fatal("expected error due to strict flag")
+	}
+
+	if got := out.String(); !strings.Contains(got, "Unable to get an update") {
+		t.Errorf("Expected 'Unable to get an update', got %q", got)
 	}
 }

@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,8 +17,9 @@ limitations under the License.
 package releaseutil // import "k8s.io/helm/pkg/releaseutil"
 
 import (
-	rspb "k8s.io/helm/pkg/proto/hapi/release"
 	"testing"
+
+	rspb "k8s.io/helm/pkg/proto/hapi/release"
 )
 
 func TestFilterAny(t *testing.T) {

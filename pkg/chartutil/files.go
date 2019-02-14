@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -16,16 +16,17 @@ limitations under the License.
 package chartutil
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"path"
 	"strings"
 
-	yaml "gopkg.in/yaml.v2"
+	"github.com/ghodss/yaml"
 
+	"github.com/BurntSushi/toml"
 	"github.com/gobwas/glob"
 	"github.com/golang/protobuf/ptypes/any"
-	"github.com/naoina/toml"
 )
 
 // Files is a map of files in a chart that can be accessed from a template.
@@ -35,10 +36,8 @@ type Files map[string][]byte
 // Given an []*any.Any (the format for files in a chart.Chart), extract a map of files.
 func NewFiles(from []*any.Any) Files {
 	files := map[string][]byte{}
-	if from != nil {
-		for _, f := range from {
-			files[f.TypeUrl] = f.Value
-		}
+	for _, f := range from {
+		files[f.TypeUrl] = f.Value
 	}
 	return files
 }
@@ -93,8 +92,8 @@ func (f Files) Glob(pattern string) Files {
 }
 
 // AsConfig turns a Files group and flattens it to a YAML map suitable for
-// including in the `data` section of a kubernetes ConfigMap definition.
-// Duplicate keys will be overwritten, so be aware that your filenames
+// including in the 'data' section of a Kubernetes ConfigMap definition.
+// Duplicate keys will be overwritten, so be aware that your file names
 // (regardless of path) should be unique.
 //
 // This is designed to be called from a template, and will return empty string
@@ -102,7 +101,7 @@ func (f Files) Glob(pattern string) Files {
 // object is nil.
 //
 // The output will not be indented, so you will want to pipe this to the
-// `indent` template function.
+// 'indent' template function.
 //
 //   data:
 // {{ .Files.Glob("config/**").AsConfig() | indent 4 }}
@@ -121,9 +120,9 @@ func (f Files) AsConfig() string {
 	return ToYaml(m)
 }
 
-// AsSecrets returns the value of a Files object as base64 suitable for
-// including in the `data` section of a kubernetes Secret definition.
-// Duplicate keys will be overwritten, so be aware that your filenames
+// AsSecrets returns the base64-encoded value of a Files object suitable for
+// including in the 'data' section of a Kubernetes Secret definition.
+// Duplicate keys will be overwritten, so be aware that your file names
 // (regardless of path) should be unique.
 //
 // This is designed to be called from a template, and will return empty string
@@ -131,7 +130,7 @@ func (f Files) AsConfig() string {
 // object is nil.
 //
 // The output will not be indented, so you will want to pipe this to the
-// `indent` template function.
+// 'indent' template function.
 //
 //   data:
 // {{ .Files.Glob("secrets/*").AsSecrets() }}
@@ -182,7 +181,7 @@ func ToYaml(v interface{}) string {
 // This is not a general-purpose YAML parser, and will not parse all valid
 // YAML documents. Additionally, because its intended use is within templates
 // it tolerates errors. It will insert the returned error message string into
-// m["error"] in the returned map.
+// m["Error"] in the returned map.
 func FromYaml(str string) map[string]interface{} {
 	m := map[string]interface{}{}
 
@@ -197,19 +196,21 @@ func FromYaml(str string) map[string]interface{} {
 //
 // This is designed to be called from a template.
 func ToToml(v interface{}) string {
-	data, err := toml.Marshal(v)
+	b := bytes.NewBuffer(nil)
+	e := toml.NewEncoder(b)
+	err := e.Encode(v)
 	if err != nil {
-		// Swallow errors inside of a template.
-		return ""
+		return err.Error()
 	}
-	return string(data)
+	return b.String()
 }
 
 // ToJson takes an interface, marshals it to json, and returns a string. It will
 // always return a string, even on marshal error (empty string).
 //
 // This is designed to be called from a template.
-func ToJson(v interface{}) string {
+// TODO: change the function signature in Helm 3
+func ToJson(v interface{}) string { // nolint
 	data, err := json.Marshal(v)
 	if err != nil {
 		// Swallow errors inside of a template.
@@ -218,13 +219,14 @@ func ToJson(v interface{}) string {
 	return string(data)
 }
 
-// FromJson converts a YAML document into a map[string]interface{}.
+// FromJson converts a JSON document into a map[string]interface{}.
 //
 // This is not a general-purpose JSON parser, and will not parse all valid
-// YAML documents. Additionally, because its intended use is within templates
+// JSON documents. Additionally, because its intended use is within templates
 // it tolerates errors. It will insert the returned error message string into
-// m["error"] in the returned map.
-func FromJson(str string) map[string]interface{} {
+// m["Error"] in the returned map.
+// TODO: change the function signature in Helm 3
+func FromJson(str string) map[string]interface{} { // nolint
 	m := map[string]interface{}{}
 
 	if err := json.Unmarshal([]byte(str), &m); err != nil {

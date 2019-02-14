@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -110,7 +111,7 @@ func (i IndexFile) Add(md *chart.Metadata, filename, baseURL, digest string) {
 		_, file := filepath.Split(filename)
 		u, err = urlutil.URLJoin(baseURL, file)
 		if err != nil {
-			u = filepath.Join(baseURL, file)
+			u = path.Join(baseURL, file)
 		}
 	}
 	cr := &ChartVersion{
@@ -155,12 +156,34 @@ func (i IndexFile) Get(name, version string) (*ChartVersion, error) {
 	if len(vs) == 0 {
 		return nil, ErrNoChartVersion
 	}
+
+	var constraint *semver.Constraints
 	if len(version) == 0 {
-		return vs[0], nil
+		constraint, _ = semver.NewConstraint("*")
+	} else {
+		var err error
+		constraint, err = semver.NewConstraint(version)
+		if err != nil {
+			return nil, err
+		}
 	}
+
+	// when customer input exact version, check whether have exact match one first
+	if len(version) != 0 {
+		for _, ver := range vs {
+			if version == ver.Version {
+				return ver, nil
+			}
+		}
+	}
+
 	for _, ver := range vs {
-		// TODO: Do we need to normalize the version field with the SemVer lib?
-		if ver.Version == version {
+		test, err := semver.NewVersion(ver.Version)
+		if err != nil {
+			continue
+		}
+
+		if constraint.Check(test) {
 			return ver, nil
 		}
 	}
@@ -218,9 +241,28 @@ func IndexDirectory(dir, baseURL string) (*IndexFile, error) {
 	if err != nil {
 		return nil, err
 	}
+	moreArchives, err := filepath.Glob(filepath.Join(dir, "**/*.tgz"))
+	if err != nil {
+		return nil, err
+	}
+	archives = append(archives, moreArchives...)
+
 	index := NewIndexFile()
 	for _, arch := range archives {
-		fname := filepath.Base(arch)
+		fname, err := filepath.Rel(dir, arch)
+		if err != nil {
+			return index, err
+		}
+
+		var parentDir string
+		parentDir, fname = filepath.Split(fname)
+		// filepath.Split appends an extra slash to the end of parentDir. We want to strip that out.
+		parentDir = strings.TrimSuffix(parentDir, string(os.PathSeparator))
+		parentURL, err := urlutil.URLJoin(baseURL, parentDir)
+		if err != nil {
+			parentURL = path.Join(baseURL, parentDir)
+		}
+
 		c, err := chartutil.Load(arch)
 		if err != nil {
 			// Assume this is not a chart.
@@ -230,7 +272,7 @@ func IndexDirectory(dir, baseURL string) (*IndexFile, error) {
 		if err != nil {
 			return index, err
 		}
-		index.Add(c.Metadata, fname, baseURL, hash)
+		index.Add(c.Metadata, fname, parentURL, hash)
 	}
 	return index, nil
 }

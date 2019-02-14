@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -30,11 +30,15 @@ var InstallOrder SortOrder = []string{
 	"Namespace",
 	"ResourceQuota",
 	"LimitRange",
+	"PodSecurityPolicy",
+	"PodDisruptionBudget",
 	"Secret",
 	"ConfigMap",
+	"StorageClass",
 	"PersistentVolume",
 	"PersistentVolumeClaim",
 	"ServiceAccount",
+	"CustomResourceDefinition",
 	"ClusterRole",
 	"ClusterRoleBinding",
 	"Role",
@@ -49,12 +53,14 @@ var InstallOrder SortOrder = []string{
 	"Job",
 	"CronJob",
 	"Ingress",
+	"APIService",
 }
 
 // UninstallOrder is the order in which manifests should be uninstalled (by Kind).
 //
 // Those occurring earlier in the list get uninstalled before those occurring later in the list.
 var UninstallOrder SortOrder = []string{
+	"APIService",
 	"Ingress",
 	"Service",
 	"CronJob",
@@ -69,11 +75,15 @@ var UninstallOrder SortOrder = []string{
 	"Role",
 	"ClusterRoleBinding",
 	"ClusterRole",
+	"CustomResourceDefinition",
 	"ServiceAccount",
 	"PersistentVolumeClaim",
 	"PersistentVolume",
+	"StorageClass",
 	"ConfigMap",
 	"Secret",
+	"PodDisruptionBudget",
+	"PodSecurityPolicy",
 	"LimitRange",
 	"ResourceQuota",
 	"Namespace",
@@ -82,7 +92,7 @@ var UninstallOrder SortOrder = []string{
 // sortByKind does an in-place sort of manifests by Kind.
 //
 // Results are sorted by 'ordering'
-func sortByKind(manifests []manifest, ordering SortOrder) []manifest {
+func sortByKind(manifests []Manifest, ordering SortOrder) []Manifest {
 	ks := newKindSorter(manifests, ordering)
 	sort.Sort(ks)
 	return ks.manifests
@@ -90,10 +100,10 @@ func sortByKind(manifests []manifest, ordering SortOrder) []manifest {
 
 type kindSorter struct {
 	ordering  map[string]int
-	manifests []manifest
+	manifests []Manifest
 }
 
-func newKindSorter(m []manifest, s SortOrder) *kindSorter {
+func newKindSorter(m []Manifest, s SortOrder) *kindSorter {
 	o := make(map[string]int, len(s))
 	for v, k := range s {
 		o[k] = v
@@ -112,14 +122,37 @@ func (k *kindSorter) Swap(i, j int) { k.manifests[i], k.manifests[j] = k.manifes
 func (k *kindSorter) Less(i, j int) bool {
 	a := k.manifests[i]
 	b := k.manifests[j]
-	first, ok := k.ordering[a.head.Kind]
-	if !ok {
-		// Unknown is always last
+	first, aok := k.ordering[a.Head.Kind]
+	second, bok := k.ordering[b.Head.Kind]
+
+	if !aok && !bok {
+		// if both are unknown then sort alphabetically by kind and name
+		if a.Head.Kind != b.Head.Kind {
+			return a.Head.Kind < b.Head.Kind
+		}
+		return a.Name < b.Name
+	}
+
+	// unknown kind is last
+	if !aok {
 		return false
 	}
-	second, ok := k.ordering[b.head.Kind]
-	if !ok {
+	if !bok {
 		return true
 	}
+
+	// if same kind sub sort alphanumeric
+	if first == second {
+		return a.Name < b.Name
+	}
+	// sort different kinds
 	return first < second
+}
+
+// SortByKind sorts manifests in InstallOrder
+func SortByKind(manifests []Manifest) []Manifest {
+	ordering := InstallOrder
+	ks := newKindSorter(manifests, ordering)
+	sort.Sort(ks)
+	return ks.manifests
 }

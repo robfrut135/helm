@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -34,22 +34,25 @@ type repoRemoveCmd struct {
 }
 
 func newRepoRemoveCmd(out io.Writer) *cobra.Command {
-	remove := &repoRemoveCmd{
-		out: out,
-	}
+	remove := &repoRemoveCmd{out: out}
 
 	cmd := &cobra.Command{
 		Use:     "remove [flags] [NAME]",
 		Aliases: []string{"rm"},
 		Short:   "remove a chart repository",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := checkArgsLength(len(args), "name of chart repository"); err != nil {
-				return err
+			if len(args) == 0 {
+				return fmt.Errorf("need at least one argument, name of chart repository")
 			}
-			remove.name = args[0]
-			remove.home = helmpath.Home(homePath())
 
-			return remove.run()
+			remove.home = settings.Home
+			for i := 0; i < len(args); i++ {
+				remove.name = args[i]
+				if err := remove.run(); err != nil {
+					return err
+				}
+			}
+			return nil
 		},
 	}
 

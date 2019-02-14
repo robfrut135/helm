@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ import (
 	"sync"
 
 	rspb "k8s.io/helm/pkg/proto/hapi/release"
+	storageerrors "k8s.io/helm/pkg/storage/errors"
 )
 
 var _ Driver = (*Memory)(nil)
@@ -53,16 +54,16 @@ func (mem *Memory) Get(key string) (*rspb.Release, error) {
 	case 2:
 		name, ver := elems[0], elems[1]
 		if _, err := strconv.Atoi(ver); err != nil {
-			return nil, ErrInvalidKey
+			return nil, storageerrors.ErrInvalidKey(key)
 		}
 		if recs, ok := mem.cache[name]; ok {
 			if r := recs.Get(key); r != nil {
 				return r.rls, nil
 			}
 		}
-		return nil, ErrReleaseNotFound
+		return nil, storageerrors.ErrReleaseNotFound(key)
 	default:
-		return nil, ErrInvalidKey
+		return nil, storageerrors.ErrInvalidKey(key)
 	}
 }
 
@@ -94,6 +95,11 @@ func (mem *Memory) Query(keyvals map[string]string) ([]*rspb.Release, error) {
 	var ls []*rspb.Release
 	for _, recs := range mem.cache {
 		recs.Iter(func(_ int, rec *record) bool {
+			// A query for a release name that doesn't exist (has been deleted)
+			// can cause rec to be nil.
+			if rec == nil {
+				return false
+			}
 			if rec.lbs.match(lbs) {
 				ls = append(ls, rec.rls)
 			}
@@ -126,28 +132,31 @@ func (mem *Memory) Update(key string, rls *rspb.Release) error {
 		rs.Replace(key, newRecord(key, rls))
 		return nil
 	}
-	return ErrReleaseNotFound
+	return storageerrors.ErrReleaseNotFound(rls.Name)
 }
 
 // Delete deletes a release or returns ErrReleaseNotFound.
 func (mem *Memory) Delete(key string) (*rspb.Release, error) {
 	defer unlock(mem.wlock())
 
-	switch elems := strings.Split(key, ".v"); len(elems) {
-	case 2:
-		name, ver := elems[0], elems[1]
-		if _, err := strconv.Atoi(ver); err != nil {
-			return nil, ErrInvalidKey
-		}
-		if recs, ok := mem.cache[name]; ok {
-			if r := recs.Remove(key); r != nil {
-				return r.rls, nil
-			}
-		}
-		return nil, ErrReleaseNotFound
-	default:
-		return nil, ErrInvalidKey
+	elems := strings.Split(key, ".v")
+
+	if len(elems) != 2 {
+		return nil, storageerrors.ErrInvalidKey(key)
 	}
+
+	name, ver := elems[0], elems[1]
+	if _, err := strconv.Atoi(ver); err != nil {
+		return nil, storageerrors.ErrInvalidKey(key)
+	}
+	if recs, ok := mem.cache[name]; ok {
+		if r := recs.Remove(key); r != nil {
+			// recs.Remove changes the slice reference, so we have to re-assign it.
+			mem.cache[name] = recs
+			return r.rls, nil
+		}
+	}
+	return nil, storageerrors.ErrReleaseNotFound(key)
 }
 
 // wlock locks mem for writing

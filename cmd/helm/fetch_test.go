@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -32,12 +32,15 @@ func TestFetchCmd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	old := homePath()
-	helmHome = hh
+	cleanup := resetEnv()
 	defer func() {
-		helmHome = old
-		os.RemoveAll(hh)
+		os.RemoveAll(hh.String())
+		cleanup()
 	}()
+	srv := repotest.NewServer(hh.String())
+	defer srv.Stop()
+
+	settings.Home = hh
 
 	// all flags will get "--home=TMDIR -d outdir" appended.
 	tests := []struct {
@@ -103,10 +106,33 @@ func TestFetchCmd(t *testing.T) {
 			expectDir:    true,
 			expectVerify: true,
 		},
+		{
+			name:       "Chart fetch using repo URL",
+			chart:      "signtest",
+			expectFile: "./signtest-0.1.0.tgz",
+			flags:      []string{"--repo", srv.URL()},
+		},
+		{
+			name:       "Fail fetching non-existent chart on repo URL",
+			chart:      "someChart",
+			flags:      []string{"--repo", srv.URL()},
+			failExpect: "Failed to fetch chart",
+			fail:       true,
+		},
+		{
+			name:       "Specific version chart fetch using repo URL",
+			chart:      "signtest",
+			expectFile: "./signtest-0.1.0.tgz",
+			flags:      []string{"--repo", srv.URL(), "--version", "0.1.0"},
+		},
+		{
+			name:       "Specific version chart fetch using repo URL",
+			chart:      "signtest",
+			flags:      []string{"--repo", srv.URL(), "--version", "0.2.0"},
+			failExpect: "Failed to fetch chart version",
+			fail:       true,
+		},
 	}
-
-	srv := repotest.NewServer(hh)
-	defer srv.Stop()
 
 	if _, err := srv.CopyCharts("testdata/testcharts/*.tgz*"); err != nil {
 		t.Fatal(err)
@@ -116,7 +142,7 @@ func TestFetchCmd(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		outdir := filepath.Join(hh, "testout")
+		outdir := filepath.Join(hh.String(), "testout")
 		os.RemoveAll(outdir)
 		os.Mkdir(outdir, 0755)
 

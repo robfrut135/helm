@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,8 +17,6 @@ limitations under the License.
 package main // import "k8s.io/helm/cmd/tiller"
 
 import (
-	"fmt"
-	"log"
 	"net/http"
 
 	_ "net/http/pprof"
@@ -27,7 +25,7 @@ import (
 )
 
 func startTracing(addr string) {
-	fmt.Printf("Tracing server is listening on %s\n", addr)
+	logger.Printf("Tracing server is listening on %s\n", addr)
 	grpc.EnableTracing = true
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -41,7 +39,7 @@ func startTracing(addr string) {
 
 	go func() {
 		if err := http.ListenAndServe(addr, nil); err != nil {
-			log.Printf("tracing error: %s", err)
+			logger.Printf("tracing error: %s", err)
 		}
 	}()
 }

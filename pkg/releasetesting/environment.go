@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,9 +20,10 @@ import (
 	"bytes"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
-	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/api/core/v1"
 
 	"k8s.io/helm/pkg/proto/hapi/release"
 	"k8s.io/helm/pkg/proto/hapi/services"
@@ -31,10 +32,13 @@ import (
 
 // Environment encapsulates information about where test suite executes and returns results
 type Environment struct {
-	Namespace  string
-	KubeClient environment.KubeClient
-	Stream     services.ReleaseService_RunReleaseTestServer
-	Timeout    int64
+	Namespace   string
+	KubeClient  environment.KubeClient
+	Stream      services.ReleaseService_RunReleaseTestServer
+	Timeout     int64
+	Parallel    bool
+	Parallelism uint32
+	streamLock  sync.Mutex
 }
 
 func (env *Environment) createTestPod(test *test) error {
@@ -49,7 +53,7 @@ func (env *Environment) createTestPod(test *test) error {
 	return nil
 }
 
-func (env *Environment) getTestPodStatus(test *test) (api.PodPhase, error) {
+func (env *Environment) getTestPodStatus(test *test) (v1.PodPhase, error) {
 	b := bytes.NewBufferString(test.manifest)
 	status, err := env.KubeClient.WaitAndGetCompletedPodPhase(env.Namespace, b, time.Duration(env.Timeout)*time.Second)
 	if err != nil {
@@ -83,31 +87,33 @@ func (env *Environment) streamResult(r *release.TestRun) error {
 
 func (env *Environment) streamRunning(name string) error {
 	msg := "RUNNING: " + name
-	return env.streamMessage(msg)
+	return env.streamMessage(msg, release.TestRun_RUNNING)
 }
 
 func (env *Environment) streamError(info string) error {
 	msg := "ERROR: " + info
-	return env.streamMessage(msg)
+	return env.streamMessage(msg, release.TestRun_FAILURE)
 }
 
 func (env *Environment) streamFailed(name string) error {
 	msg := fmt.Sprintf("FAILED: %s, run `kubectl logs %s --namespace %s` for more info", name, name, env.Namespace)
-	return env.streamMessage(msg)
+	return env.streamMessage(msg, release.TestRun_FAILURE)
 }
 
 func (env *Environment) streamSuccess(name string) error {
 	msg := fmt.Sprintf("PASSED: %s", name)
-	return env.streamMessage(msg)
+	return env.streamMessage(msg, release.TestRun_SUCCESS)
 }
 
 func (env *Environment) streamUnknown(name, info string) error {
 	msg := fmt.Sprintf("UNKNOWN: %s: %s", name, info)
-	return env.streamMessage(msg)
+	return env.streamMessage(msg, release.TestRun_UNKNOWN)
 }
 
-func (env *Environment) streamMessage(msg string) error {
-	resp := &services.TestReleaseResponse{Msg: msg}
+func (env *Environment) streamMessage(msg string, status release.TestRun_Status) error {
+	resp := &services.TestReleaseResponse{Msg: msg, Status: status}
+	env.streamLock.Lock()
+	defer env.streamLock.Unlock()
 	return env.Stream.Send(resp)
 }
 

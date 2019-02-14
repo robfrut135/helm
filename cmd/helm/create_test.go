@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -33,7 +33,7 @@ func TestCreateCmd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(tdir)
+	defer os.RemoveAll(tdir)
 
 	// CD into it
 	pwd, err := os.Getwd()
@@ -46,7 +46,7 @@ func TestCreateCmd(t *testing.T) {
 	defer os.Chdir(pwd)
 
 	// Run a create
-	cmd := newCreateCmd(os.Stdout)
+	cmd := newCreateCmd(ioutil.Discard)
 	if err := cmd.RunE(cmd, []string{cname}); err != nil {
 		t.Errorf("Failed to run create: %s", err)
 		return
@@ -79,21 +79,22 @@ func TestCreateStarterCmd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(tdir)
+	defer os.RemoveAll(tdir)
 
 	thome, err := tempHelmHome(t)
 	if err != nil {
 		t.Fatal(err)
 	}
-	old := homePath()
-	helmHome = thome
+	cleanup := resetEnv()
 	defer func() {
-		helmHome = old
-		os.RemoveAll(thome)
+		os.RemoveAll(thome.String())
+		cleanup()
 	}()
 
+	settings.Home = thome
+
 	// Create a starter.
-	starterchart := filepath.Join(thome, "starters")
+	starterchart := filepath.Join(thome.String(), "starters")
 	os.Mkdir(starterchart, 0755)
 	if dest, err := chartutil.Create(&chart.Metadata{Name: "starterchart"}, starterchart); err != nil {
 		t.Fatalf("Could not create chart: %s", err)
@@ -116,7 +117,7 @@ func TestCreateStarterCmd(t *testing.T) {
 	defer os.Chdir(pwd)
 
 	// Run a create
-	cmd := newCreateCmd(os.Stdout)
+	cmd := newCreateCmd(ioutil.Discard)
 	cmd.ParseFlags([]string{"--starter", "starterchart"})
 	if err := cmd.RunE(cmd, []string{cname}); err != nil {
 		t.Errorf("Failed to run create: %s", err)
@@ -142,8 +143,9 @@ func TestCreateStarterCmd(t *testing.T) {
 		t.Errorf("Wrong API version: %q", c.Metadata.ApiVersion)
 	}
 
-	if l := len(c.Templates); l != 5 {
-		t.Errorf("Expected 5 templates, got %d", l)
+	expectedTemplateCount := 7
+	if l := len(c.Templates); l != expectedTemplateCount {
+		t.Errorf("Expected %d templates, got %d", expectedTemplateCount, l)
 	}
 
 	found := false

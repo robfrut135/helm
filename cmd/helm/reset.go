@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,17 +23,17 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
-	"k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
+
+	"k8s.io/client-go/kubernetes"
 
 	"k8s.io/helm/cmd/helm/installer"
 	"k8s.io/helm/pkg/helm"
 	"k8s.io/helm/pkg/helm/helmpath"
-	"k8s.io/helm/pkg/kube"
 	"k8s.io/helm/pkg/proto/hapi/release"
 )
 
 const resetDesc = `
-This command uninstalls Tiller (the helm server side component) from your
+This command uninstalls Tiller (the Helm server-side component) from your
 Kubernetes Cluster and optionally deletes local configuration in
 $HELM_HOME (default ~/.helm/)
 `
@@ -45,8 +45,7 @@ type resetCmd struct {
 	out            io.Writer
 	home           helmpath.Home
 	client         helm.Interface
-	kubeClient     internalclientset.Interface
-	kubeCmd        *kube.Client
+	kubeClient     kubernetes.Interface
 }
 
 func newResetCmd(client helm.Interface, out io.Writer) *cobra.Command {
@@ -56,17 +55,22 @@ func newResetCmd(client helm.Interface, out io.Writer) *cobra.Command {
 	}
 
 	cmd := &cobra.Command{
-		Use:               "reset",
-		Short:             "uninstalls Tiller from a cluster",
-		Long:              resetDesc,
-		PersistentPreRunE: setupConnection,
+		Use:   "reset",
+		Short: "uninstalls Tiller from a cluster",
+		Long:  resetDesc,
+		PreRunE: func(cmd *cobra.Command, args []string) error {
+			if err := setupConnection(); !d.force && err != nil {
+				return err
+			}
+			return nil
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 0 {
 				return errors.New("This command does not accept arguments")
 			}
 
-			d.namespace = tillerNamespace
-			d.home = helmpath.Home(homePath())
+			d.namespace = settings.TillerNamespace
+			d.home = settings.Home
 			d.client = ensureHelmClient(d.client)
 
 			return d.run()
@@ -74,8 +78,12 @@ func newResetCmd(client helm.Interface, out io.Writer) *cobra.Command {
 	}
 
 	f := cmd.Flags()
-	f.BoolVarP(&d.force, "force", "f", false, "forces Tiller uninstall even if there are releases installed")
+	settings.AddFlagsTLS(f)
+	f.BoolVarP(&d.force, "force", "f", false, "forces Tiller uninstall even if there are releases installed, or if Tiller is not in ready state. Releases are not deleted.)")
 	f.BoolVar(&d.removeHelmHome, "remove-helm-home", false, "if set deletes $HELM_HOME")
+
+	// set defaults from environment
+	settings.InitTLS(f)
 
 	return cmd
 }
@@ -83,28 +91,25 @@ func newResetCmd(client helm.Interface, out io.Writer) *cobra.Command {
 // runReset uninstalls tiller from Kubernetes Cluster and deletes local config
 func (d *resetCmd) run() error {
 	if d.kubeClient == nil {
-		_, c, err := getKubeClient(kubeContext)
+		_, c, err := getKubeClient(settings.KubeContext, settings.KubeConfig)
 		if err != nil {
 			return fmt.Errorf("could not get kubernetes client: %s", err)
 		}
 		d.kubeClient = c
 	}
-	if d.kubeCmd == nil {
-		d.kubeCmd = getKubeCmd(kubeContext)
-	}
 
 	res, err := d.client.ListReleases(
 		helm.ReleaseListStatuses([]release.Status_Code{release.Status_DEPLOYED}),
 	)
-	if err != nil {
+	if !d.force && err != nil {
 		return prettyError(err)
 	}
 
-	if len(res.Releases) > 0 && !d.force {
-		return fmt.Errorf("There are still %d deployed releases (Tip: use --force).", len(res.Releases))
+	if !d.force && res != nil && len(res.Releases) > 0 {
+		return fmt.Errorf("there are still %d deployed releases (Tip: use --force to remove Tiller. Releases will not be deleted.)", len(res.Releases))
 	}
 
-	if err := installer.Uninstall(d.kubeClient, d.kubeCmd, &installer.Options{Namespace: d.namespace}); err != nil {
+	if err := installer.Uninstall(d.kubeClient, &installer.Options{Namespace: d.namespace}); err != nil {
 		return fmt.Errorf("error unstalling Tiller: %s", err)
 	}
 
@@ -114,7 +119,7 @@ func (d *resetCmd) run() error {
 		}
 	}
 
-	fmt.Fprintln(d.out, "Tiller (the helm server side component) has been uninstalled from your Kubernetes Cluster.")
+	fmt.Fprintln(d.out, "Tiller (the Helm server-side component) has been uninstalled from your Kubernetes Cluster.")
 	return nil
 }
 

@@ -1,4 +1,4 @@
-# Using Helm
+﻿# Using Helm
 
 This guide explains the basics of using Helm (and Tiller) to manage
 packages on your Kubernetes cluster. It assumes that you have already
@@ -43,7 +43,7 @@ carefully curated and maintained charts. This chart repository is named
 
 You can see which charts are available by running `helm search`:
 
-```
+```console
 $ helm search
 NAME                 	VERSION 	DESCRIPTION
 stable/drupal   	0.3.2   	One of the most versatile open source content m...
@@ -56,20 +56,20 @@ stable/mysql    	0.1.0   	Chart for MySQL
 With no filter, `helm search` shows you all of the available charts. You
 can narrow down your results by searching with a filter:
 
-```
+```console
 $ helm search mysql
 NAME               	VERSION	DESCRIPTION
 stable/mysql  	0.1.0  	Chart for MySQL
 stable/mariadb	0.5.1  	Chart for MariaDB
 ```
 
-Now you will only see the results that match your filter. 
+Now you will only see the results that match your filter.
 
 Why is
 `mariadb` in the list? Because its package description relates it to
 MySQL. We can use `helm inspect chart` to see this:
 
-```
+```console
 $ helm inspect stable/mariadb
 Fetched stable/mariadb to mariadb-0.5.1.tgz
 description: Chart for MariaDB
@@ -91,13 +91,13 @@ package you want to install, you can use `helm install` to install it.
 To install a new package, use the `helm install` command. At its
 simplest, it takes only one argument: The name of the chart.
 
-```
+```console
 $ helm install stable/mariadb
 Fetched stable/mariadb-0.3.0 to /Users/mattbutcher/Code/Go/src/k8s.io/helm/mariadb-0.3.0.tgz
-happy-panda
-Last Deployed: Wed Sep 28 12:32:28 2016
-Namespace: default
-Status: DEPLOYED
+NAME: happy-panda
+LAST DEPLOYED: Wed Sep 28 12:32:28 2016
+NAMESPACE: default
+STATUS: DEPLOYED
 
 Resources:
 ==> extensions/Deployment
@@ -139,7 +139,7 @@ may take a long time to install into the cluster.
 To keep track of a release's state, or to re-read configuration
 information, you can use `helm status`:
 
-```
+```console
 $ helm status happy-panda
 Last Deployed: Wed Sep 28 12:32:28 2016
 Namespace: default
@@ -215,20 +215,28 @@ You can then override any of these settings in a YAML formatted file,
 and then pass that file during installation.
 
 ```console
-$ echo 'mariadbUser: user0` > config.yaml
+$ cat << EOF > config.yaml
+mariadbUser: user0
+mariadbDatabase: user0db
+EOF
 $ helm install -f config.yaml stable/mariadb
 ```
 
-The above will set the default MariaDB user to `user0`, but accept all
-the rest of the defaults for that chart.
+The above will create a default MariaDB user with the name `user0`, and
+grant this user access to a newly created `user0db` database, but will
+accept all the rest of the defaults for that chart.
 
 There are two ways to pass configuration data during install:
 
 - `--values` (or `-f`): Specify a YAML file with overrides. This can be specified multiple times
   and the rightmost file will take precedence
-- `--set`: Specify overrides on the command line.
+- `--set` (and its variants `--set-string` and `--set-file`): Specify overrides on the command line.
 
 If both are used, `--set` values are merged into `--values` with higher precedence.
+Overrides specified with `--set` are persisted in a configmap. Values that have been
+`--set` can be viewed for a given release with `helm get values <release-name>`.
+Values that have been `--set` can be cleared by running `helm upgrade` with `--reset-values`
+specified.
 
 #### The Format and Limitations of `--set`
 
@@ -263,8 +271,24 @@ name:
   - c
 ```
 
+As of Helm 2.5.0, it is possible to access list items using an array index syntax.
+For example, `--set servers[0].port=80` becomes:
+
+```yaml
+servers:
+  - port: 80
+```
+
+Multiple values can be set this way. The line `--set servers[0].port=80,servers[0].host=example` becomes:
+
+```yaml
+servers:
+  - port: 80
+    host: example
+```
+
 Sometimes you need to use special characters in your `--set` lines. You can use
-a backslash to escape the characters; `--set name=value1\,value2` will become:
+a backslash to escape the characters; `--set name="value1\,value2"` will become:
 
 ```yaml
 name: "value1,value2"
@@ -279,9 +303,38 @@ nodeSelector:
   kubernetes.io/role: master
 ```
 
-The `--set` syntax is not as expressive as YAML, especially when it comes to
-collections. And there is currently no method for expressing things such as "set
-the third item in a list to...".
+Deeply nested data structures can be difficult to express using `--set`. Chart
+designers are encouraged to consider the `--set` usage when designing the format
+of a `values.yaml` file.
+
+Helm will cast certain values specified with `--set` to integers.
+For example, `--set foo=true` results Helm to cast `true` into an int64 value.
+In case you want a string, use a `--set`'s variant named `--set-string`. `--set-string foo=true` results in a string value of `"true"`.
+
+`--set-file key=filepath` is another variant of `--set`.
+It reads the file and use its content as a value.
+An example use case of it is to inject a multi-line text into values without dealing with indentation in YAML.
+Say you want to create a [brigade](https://github.com/Azure/brigade) project with certain value containing 5 lines JavaScript code, you might write a `values.yaml` like:
+
+```yaml
+defaultScript: |
+  const { events, Job } = require("brigadier")
+  function run(e, project) {
+    console.log("hello default script")
+  }
+  events.on("run", run)
+```
+
+Being embedded in a YAML, this makes it harder for you to use IDE features and testing framework and so on that supports writing code.
+Instead, you can use `--set-file defaultScript=brigade.js` with `brigade.js` containing:
+
+```javascript
+const { events, Job } = require("brigadier")
+function run(e, project) {
+  console.log("hello default script")
+}
+events.on("run", run)
+```
 
 ### More Installation Methods
 
@@ -355,13 +408,12 @@ is not a full list of cli flags. To see a description of all flags, just run
   This defaults to 300 (5 minutes)
 - `--wait`: Waits until all Pods are in a ready state, PVCs are bound, Deployments
   have minimum (`Desired` minus `maxUnavailable`) Pods in ready state and
-  Services have and IP address (and Ingress if a `LoadBalancer`) before 
-  marking the release as successful. It will wait for as long as the 
-  `--timeout` value. If timeout is reached, the release will be marked as 
-  `FAILED`.
-
-  Note: In scenario where Deployment has `replicas` set to 1 and `maxUnavailable` is not set to 0 as part of rolling
-  update strategy, `--wait` will return as ready as it has satisfied the minimum Pod in ready condition.
+  Services have an IP address (and Ingress if a `LoadBalancer`) before
+  marking the release as successful. It will wait for as long as the
+  `--timeout` value. If timeout is reached, the release will be marked as
+  `FAILED`. Note: In scenario where Deployment has `replicas` set to 1 and
+  `maxUnavailable` is not set to 0 as part of rolling update strategy,
+  `--wait` will return as ready as it has satisfied the minimum Pod in ready condition.
 - `--no-hooks`: This skips running hooks for the command
 - `--recreate-pods` (only available for `upgrade` and `rollback`): This flag
   will cause all pods to be recreated (with the exception of pods belonging to
@@ -372,14 +424,14 @@ is not a full list of cli flags. To see a description of all flags, just run
 When it is time to uninstall or delete a release from the cluster, use
 the `helm delete` command:
 
-```
+```console
 $ helm delete happy-panda
 ```
 
 This will remove the release from the cluster. You can see all of your
 currently deployed releases with the `helm list` command:
 
-```
+```console
 $ helm list
 NAME           	VERSION	UPDATED                        	STATUS         	CHART
 inky-cat       	1      	Wed Sep 28 12:59:46 2016       	DEPLOYED       	alpine-0.1.0
@@ -469,9 +521,18 @@ $ helm install ./deis-workflow-0.1.0.tgz
 Charts that are archived can be loaded into chart repositories. See the
 documentation for your chart repository server to learn how to upload.
 
-Note: The `stable` repository is managed on the [Kubernetes Charts
-GitHub repository](https://github.com/kubernetes/charts). That project
+Note: The `stable` repository is managed on the [Helm Charts
+GitHub repository](https://github.com/helm/charts). That project
 accepts chart source code, and (after audit) packages those for you.
+
+## Tiller, Namespaces and RBAC
+In some cases you may wish to scope Tiller or deploy multiple Tillers to a single cluster. Here are some best practices when operating in those circumstances.
+
+1. Tiller can be [installed](install.md) into any namespace. By default, it is installed into kube-system. You can run multiple Tillers provided they each run in their own namespace.
+2. Limiting Tiller to only be able to install into specific namespaces and/or resource types is controlled by Kubernetes [RBAC](https://kubernetes.io/docs/admin/authorization/rbac/) roles and rolebindings. You can add a service account to Tiller when configuring Helm via `helm init --service-account <NAME>`. You can find more information about that [here](rbac.md).
+3. Release names are unique PER TILLER INSTANCE.
+4. Charts should only contain resources that exist in a single namespace.
+5. It is not recommended to have multiple Tillers configured to manage resources in the same namespace.
 
 ## Conclusion
 

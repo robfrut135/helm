@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -30,9 +30,12 @@ import (
 	"golang.org/x/crypto/ssh/terminal"
 
 	"k8s.io/helm/pkg/chartutil"
+	"k8s.io/helm/pkg/downloader"
+	"k8s.io/helm/pkg/getter"
 	"k8s.io/helm/pkg/helm/helmpath"
 	"k8s.io/helm/pkg/proto/hapi/chart"
 	"k8s.io/helm/pkg/provenance"
+	"k8s.io/helm/pkg/renderutil"
 	"k8s.io/helm/pkg/repo"
 )
 
@@ -48,31 +51,31 @@ Versioned chart archives are used by Helm package repositories.
 `
 
 type packageCmd struct {
-	save        bool
-	sign        bool
-	path        string
-	key         string
-	keyring     string
-	version     string
-	destination string
+	save             bool
+	sign             bool
+	path             string
+	key              string
+	keyring          string
+	version          string
+	appVersion       string
+	destination      string
+	dependencyUpdate bool
 
 	out  io.Writer
 	home helmpath.Home
 }
 
 func newPackageCmd(out io.Writer) *cobra.Command {
-	pkg := &packageCmd{
-		out: out,
-	}
+	pkg := &packageCmd{out: out}
 
 	cmd := &cobra.Command{
 		Use:   "package [flags] [CHART_PATH] [...]",
 		Short: "package a chart directory into a chart archive",
 		Long:  packageDesc,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			pkg.home = helmpath.Home(homePath())
+			pkg.home = settings.Home
 			if len(args) == 0 {
-				return fmt.Errorf("This command needs at least one argument, the path to the chart.")
+				return fmt.Errorf("need at least one argument, the path to the chart")
 			}
 			if pkg.sign {
 				if pkg.key == "" {
@@ -84,7 +87,7 @@ func newPackageCmd(out io.Writer) *cobra.Command {
 			}
 			for i := 0; i < len(args); i++ {
 				pkg.path = args[i]
-				if err := pkg.run(cmd, args); err != nil {
+				if err := pkg.run(); err != nil {
 					return err
 				}
 			}
@@ -98,15 +101,32 @@ func newPackageCmd(out io.Writer) *cobra.Command {
 	f.StringVar(&pkg.key, "key", "", "name of the key to use when signing. Used if --sign is true")
 	f.StringVar(&pkg.keyring, "keyring", defaultKeyring(), "location of a public keyring")
 	f.StringVar(&pkg.version, "version", "", "set the version on the chart to this semver version")
+	f.StringVar(&pkg.appVersion, "app-version", "", "set the appVersion on the chart to this version")
 	f.StringVarP(&pkg.destination, "destination", "d", ".", "location to write the chart.")
+	f.BoolVarP(&pkg.dependencyUpdate, "dependency-update", "u", false, `update dependencies from "requirements.yaml" to dir "charts/" before packaging`)
 
 	return cmd
 }
 
-func (p *packageCmd) run(cmd *cobra.Command, args []string) error {
+func (p *packageCmd) run() error {
 	path, err := filepath.Abs(p.path)
 	if err != nil {
 		return err
+	}
+
+	if p.dependencyUpdate {
+		downloadManager := &downloader.Manager{
+			Out:       p.out,
+			ChartPath: path,
+			HelmHome:  settings.Home,
+			Keyring:   p.keyring,
+			Getters:   getter.All(settings),
+			Debug:     settings.Debug,
+		}
+
+		if err := downloadManager.Update(); err != nil {
+			return err
+		}
 	}
 
 	ch, err := chartutil.LoadDir(path)
@@ -119,9 +139,12 @@ func (p *packageCmd) run(cmd *cobra.Command, args []string) error {
 		if err := setVersion(ch, p.version); err != nil {
 			return err
 		}
-		if flagDebug {
-			fmt.Fprintf(p.out, "Setting version to %s", p.version)
-		}
+		debug("Setting version to %s", p.version)
+	}
+
+	if p.appVersion != "" {
+		ch.Metadata.AppVersion = p.appVersion
+		debug("Setting appVersion to %s", p.appVersion)
 	}
 
 	if filepath.Base(path) != ch.Metadata.Name {
@@ -129,7 +152,13 @@ func (p *packageCmd) run(cmd *cobra.Command, args []string) error {
 	}
 
 	if reqs, err := chartutil.LoadRequirements(ch); err == nil {
-		checkDependencies(ch, reqs, p.out)
+		if err := renderutil.CheckDependencies(ch, reqs); err != nil {
+			return err
+		}
+	} else {
+		if err != chartutil.ErrRequirementsNotFound {
+			return err
+		}
 	}
 
 	var dest string
@@ -145,8 +174,10 @@ func (p *packageCmd) run(cmd *cobra.Command, args []string) error {
 	}
 
 	name, err := chartutil.Save(ch, dest)
-	if err == nil && flagDebug {
-		fmt.Fprintf(p.out, "Saved %s to current directory\n", name)
+	if err == nil {
+		fmt.Fprintf(p.out, "Successfully packaged chart and saved it to: %s\n", name)
+	} else {
+		return fmt.Errorf("Failed to save: %s", err)
 	}
 
 	// Save to $HELM_HOME/local directory. This is second, because we don't want
@@ -155,9 +186,8 @@ func (p *packageCmd) run(cmd *cobra.Command, args []string) error {
 		lr := p.home.LocalRepository()
 		if err := repo.AddChartToLocalRepo(ch, lr); err != nil {
 			return err
-		} else if flagDebug {
-			fmt.Fprintf(p.out, "Saved %s to %s\n", name, lr)
 		}
+		debug("Successfully saved %s to %s\n", name, lr)
 	}
 
 	if p.sign {
@@ -185,7 +215,7 @@ func (p *packageCmd) clearsign(filename string) error {
 		return err
 	}
 
-	if err := signer.DecryptKey(promptUser); err != nil {
+	if err := signer.DecryptKey(passphraseFetcher); err != nil {
 		return err
 	}
 
@@ -194,15 +224,18 @@ func (p *packageCmd) clearsign(filename string) error {
 		return err
 	}
 
-	if flagDebug {
-		fmt.Fprintln(p.out, sig)
-	}
+	debug(sig)
 
 	return ioutil.WriteFile(filename+".prov", []byte(sig), 0755)
 }
 
-// promptUser implements provenance.PassphraseFetcher
-func promptUser(name string) ([]byte, error) {
+// passphraseFetcher implements provenance.PassphraseFetcher
+func passphraseFetcher(name string) ([]byte, error) {
+	var passphrase = settings.HelmKeyPassphrase()
+	if passphrase != "" {
+		return []byte(passphrase), nil
+	}
+
 	fmt.Printf("Password for key %q >  ", name)
 	pw, err := terminal.ReadPassword(int(syscall.Stdin))
 	fmt.Println()

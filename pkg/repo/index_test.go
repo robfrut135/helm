@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,12 +18,13 @@ package repo
 
 import (
 	"io/ioutil"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"k8s.io/helm/pkg/getter"
+	"k8s.io/helm/pkg/helm/environment"
 	"k8s.io/helm/pkg/proto/hapi/chart"
 )
 
@@ -39,14 +40,17 @@ func TestIndexFile(t *testing.T) {
 	i.Add(&chart.Metadata{Name: "cutter", Version: "0.1.1"}, "cutter-0.1.1.tgz", "http://example.com/charts", "sha256:1234567890abc")
 	i.Add(&chart.Metadata{Name: "cutter", Version: "0.1.0"}, "cutter-0.1.0.tgz", "http://example.com/charts", "sha256:1234567890abc")
 	i.Add(&chart.Metadata{Name: "cutter", Version: "0.2.0"}, "cutter-0.2.0.tgz", "http://example.com/charts", "sha256:1234567890abc")
+	i.Add(&chart.Metadata{Name: "setter", Version: "0.1.9+alpha"}, "setter-0.1.9+alpha.tgz", "http://example.com/charts", "sha256:1234567890abc")
+	i.Add(&chart.Metadata{Name: "setter", Version: "0.1.9+beta"}, "setter-0.1.9+beta.tgz", "http://example.com/charts", "sha256:1234567890abc")
+
 	i.SortEntries()
 
 	if i.APIVersion != APIVersionV1 {
 		t.Error("Expected API version v1")
 	}
 
-	if len(i.Entries) != 2 {
-		t.Errorf("Expected 2 charts. Got %d", len(i.Entries))
+	if len(i.Entries) != 3 {
+		t.Errorf("Expected 3 charts. Got %d", len(i.Entries))
 	}
 
 	if i.Entries["clipper"][0].Name != "clipper" {
@@ -54,12 +58,22 @@ func TestIndexFile(t *testing.T) {
 	}
 
 	if len(i.Entries["cutter"]) != 3 {
-		t.Error("Expected two cutters.")
+		t.Error("Expected three cutters.")
 	}
 
 	// Test that the sort worked. 0.2 should be at the first index for Cutter.
 	if v := i.Entries["cutter"][0].Version; v != "0.2.0" {
 		t.Errorf("Unexpected first version: %s", v)
+	}
+
+	cv, err := i.Get("setter", "0.1.9")
+	if err == nil && strings.Index(cv.Metadata.Version, "0.1.9") < 0 {
+		t.Errorf("Unexpected version: %s", cv.Metadata.Version)
+	}
+
+	cv, err = i.Get("setter", "0.1.9+alpha")
+	if err != nil || cv.Metadata.Version != "0.1.9+alpha" {
+		t.Errorf("Expected version: 0.1.9+alpha")
 	}
 }
 
@@ -129,14 +143,10 @@ func TestMerge(t *testing.T) {
 }
 
 func TestDownloadIndexFile(t *testing.T) {
-	fileBytes, err := ioutil.ReadFile("testdata/local-index.yaml")
+	srv, err := startLocalServerForTests(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write(fileBytes)
-	}))
 	defer srv.Close()
 
 	dirName, err := ioutil.TempDir("", "tmp")
@@ -150,7 +160,7 @@ func TestDownloadIndexFile(t *testing.T) {
 		Name:  testRepo,
 		URL:   srv.URL,
 		Cache: indexFilePath,
-	})
+	}, getter.All(environment.EnvSettings{}))
 	if err != nil {
 		t.Errorf("Problem creating chart repository from %s: %v", testRepo, err)
 	}
@@ -179,8 +189,8 @@ func TestDownloadIndexFile(t *testing.T) {
 
 func verifyLocalIndex(t *testing.T, i *IndexFile) {
 	numEntries := len(i.Entries)
-	if numEntries != 2 {
-		t.Errorf("Expected 2 entries in index file but got %d", numEntries)
+	if numEntries != 3 {
+		t.Errorf("Expected 3 entries in index file but got %d", numEntries)
 	}
 
 	alpine, ok := i.Entries["alpine"]
@@ -276,33 +286,41 @@ func verifyLocalIndex(t *testing.T, i *IndexFile) {
 }
 
 func TestIndexDirectory(t *testing.T) {
-	dir := "testdata/repository"
+	dir := filepath.Join("testdata", "repository")
 	index, err := IndexDirectory(dir, "http://localhost:8080")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if l := len(index.Entries); l != 2 {
-		t.Fatalf("Expected 2 entries, got %d", l)
+	if l := len(index.Entries); l != 3 {
+		t.Fatalf("Expected 3 entries, got %d", l)
 	}
 
 	// Other things test the entry generation more thoroughly. We just test a
 	// few fields.
-	cname := "frobnitz"
-	frobs, ok := index.Entries[cname]
-	if !ok {
-		t.Fatalf("Could not read chart %s", cname)
+
+	corpus := []struct{ chartName, downloadLink string }{
+		{"frobnitz", "http://localhost:8080/frobnitz-1.2.3.tgz"},
+		{"zarthal", "http://localhost:8080/universe/zarthal-1.0.0.tgz"},
 	}
 
-	frob := frobs[0]
-	if len(frob.Digest) == 0 {
-		t.Errorf("Missing digest of file %s.", frob.Name)
-	}
-	if frob.URLs[0] != "http://localhost:8080/frobnitz-1.2.3.tgz" {
-		t.Errorf("Unexpected URLs: %v", frob.URLs)
-	}
-	if frob.Name != "frobnitz" {
-		t.Errorf("Expected frobnitz, got %q", frob.Name)
+	for _, test := range corpus {
+		cname := test.chartName
+		frobs, ok := index.Entries[cname]
+		if !ok {
+			t.Fatalf("Could not read chart %s", cname)
+		}
+
+		frob := frobs[0]
+		if len(frob.Digest) == 0 {
+			t.Errorf("Missing digest of file %s.", frob.Name)
+		}
+		if frob.URLs[0] != test.downloadLink {
+			t.Errorf("Unexpected URLs: %v", frob.URLs)
+		}
+		if frob.Name != cname {
+			t.Errorf("Expected %q, got %q", cname, frob.Name)
+		}
 	}
 }
 

@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -21,6 +21,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"k8s.io/helm/pkg/downloader"
+	"k8s.io/helm/pkg/getter"
 	"k8s.io/helm/pkg/helm/helmpath"
 )
 
@@ -44,16 +45,14 @@ type dependencyBuildCmd struct {
 }
 
 func newDependencyBuildCmd(out io.Writer) *cobra.Command {
-	dbc := &dependencyBuildCmd{
-		out: out,
-	}
+	dbc := &dependencyBuildCmd{out: out}
 
 	cmd := &cobra.Command{
 		Use:   "build [flags] CHART",
 		Short: "rebuild the charts/ directory based on the requirements.lock file",
 		Long:  dependencyBuildDesc,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dbc.helmhome = helmpath.Home(homePath())
+			dbc.helmhome = settings.Home
 			dbc.chartpath = "."
 
 			if len(args) > 0 {
@@ -76,6 +75,7 @@ func (d *dependencyBuildCmd) run() error {
 		ChartPath: d.chartpath,
 		HelmHome:  d.helmhome,
 		Keyring:   d.keyring,
+		Getters:   getter.All(settings),
 	}
 	if d.verify {
 		man.Verify = downloader.VerifyIfPossible

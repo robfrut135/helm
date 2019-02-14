@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -34,15 +34,13 @@ type repoListCmd struct {
 }
 
 func newRepoListCmd(out io.Writer) *cobra.Command {
-	list := &repoListCmd{
-		out: out,
-	}
+	list := &repoListCmd{out: out}
 
 	cmd := &cobra.Command{
 		Use:   "list [flags]",
 		Short: "list chart repositories",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			list.home = helmpath.Home(homePath())
+			list.home = settings.Home
 			return list.run()
 		},
 	}

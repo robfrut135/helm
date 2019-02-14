@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,7 +21,6 @@ import (
 	"io"
 
 	"github.com/spf13/cobra"
-	"k8s.io/helm/pkg/helm/helmpath"
 )
 
 var longHomeHelp = `
@@ -35,9 +34,9 @@ func newHomeCmd(out io.Writer) *cobra.Command {
 		Short: "displays the location of HELM_HOME",
 		Long:  longHomeHelp,
 		Run: func(cmd *cobra.Command, args []string) {
-			h := helmpath.Home(homePath())
-			fmt.Fprintf(out, "%s\n", h)
-			if flagDebug {
+			h := settings.Home
+			fmt.Fprintln(out, h)
+			if settings.Debug {
 				fmt.Fprintf(out, "Repository: %s\n", h.Repository())
 				fmt.Fprintf(out, "RepositoryFile: %s\n", h.RepositoryFile())
 				fmt.Fprintf(out, "Cache: %s\n", h.Cache())
@@ -48,6 +47,5 @@ func newHomeCmd(out io.Writer) *cobra.Command {
 			}
 		},
 	}
-
 	return cmd
 }

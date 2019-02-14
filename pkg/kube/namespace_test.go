@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,7 +19,8 @@ package kube // import "k8s.io/helm/pkg/kube"
 import (
 	"testing"
 
-	"k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/fake"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 func TestEnsureNamespace(t *testing.T) {
@@ -30,7 +31,7 @@ func TestEnsureNamespace(t *testing.T) {
 	if err := ensureNamespace(client, "foo"); err != nil {
 		t.Fatalf("unexpected error: %s", err)
 	}
-	if _, err := client.Core().Namespaces().Get("foo"); err != nil {
+	if _, err := client.CoreV1().Namespaces().Get("foo", metav1.GetOptions{}); err != nil {
 		t.Fatalf("unexpected error: %s", err)
 	}
 }

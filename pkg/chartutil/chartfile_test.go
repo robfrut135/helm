@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -88,10 +88,35 @@ func verifyChartfile(t *testing.T, f *chart.Metadata, name string) {
 		t.Error("Unexpected keywords")
 	}
 
+	if len(f.Annotations) != 2 {
+		t.Fatalf("Unexpected annotations")
+	}
+
+	if want, got := "extravalue", f.Annotations["extrakey"]; want != got {
+		t.Errorf("Want %q, but got %q", want, got)
+	}
+
+	if want, got := "anothervalue", f.Annotations["anotherkey"]; want != got {
+		t.Errorf("Want %q, but got %q", want, got)
+	}
+
 	kk := []string{"frobnitz", "sprocket", "dodad"}
 	for i, k := range f.Keywords {
 		if kk[i] != k {
 			t.Errorf("Expected %q, got %q", kk[i], k)
 		}
+	}
+}
+
+func TestIsChartDir(t *testing.T) {
+	validChartDir, err := IsChartDir("testdata/frobnitz")
+	if !validChartDir {
+		t.Errorf("unexpected error while reading chart-directory: (%v)", err)
+		return
+	}
+	validChartDir, err = IsChartDir("testdata")
+	if validChartDir || err == nil {
+		t.Errorf("expected error but did not get any")
+		return
 	}
 }

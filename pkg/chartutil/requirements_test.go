@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -15,12 +15,15 @@ limitations under the License.
 package chartutil
 
 import (
+	"os"
+	"path/filepath"
 	"sort"
 	"testing"
 
 	"strconv"
 
 	"k8s.io/helm/pkg/proto/hapi/chart"
+	"k8s.io/helm/pkg/version"
 )
 
 func TestLoadRequirements(t *testing.T) {
@@ -282,7 +285,7 @@ func TestProcessRequirementsImportValues(t *testing.T) {
 }
 func verifyRequirementsImportValues(t *testing.T, c *chart.Chart, v *chart.Config, e map[string]string) {
 
-	err := ProcessRequirementsImportValues(c, v)
+	err := ProcessRequirementsImportValues(c)
 	if err != nil {
 		t.Errorf("Error processing import values requirements %v", err)
 	}
@@ -319,4 +322,185 @@ func verifyRequirementsImportValues(t *testing.T, c *chart.Chart, v *chart.Confi
 		}
 
 	}
+}
+
+func TestGetAliasDependency(t *testing.T) {
+	c, err := Load("testdata/frobnitz")
+	if err != nil {
+		t.Fatalf("Failed to load testdata: %s", err)
+	}
+	req, err := LoadRequirements(c)
+	if err != nil {
+		t.Fatalf("Failed to load requirement for testdata: %s", err)
+	}
+	if len(req.Dependencies) == 0 {
+		t.Fatalf("There are no requirements to test")
+	}
+
+	// Success case
+	aliasChart := getAliasDependency(c.Dependencies, req.Dependencies[0])
+	if aliasChart == nil {
+		t.Fatalf("Failed to get dependency chart for alias %s", req.Dependencies[0].Name)
+	}
+	if req.Dependencies[0].Alias != "" {
+		if aliasChart.Metadata.Name != req.Dependencies[0].Alias {
+			t.Fatalf("Dependency chart name should be %s but got %s", req.Dependencies[0].Alias, aliasChart.Metadata.Name)
+		}
+	} else if aliasChart.Metadata.Name != req.Dependencies[0].Name {
+		t.Fatalf("Dependency chart name should be %s but got %s", req.Dependencies[0].Name, aliasChart.Metadata.Name)
+	}
+
+	if req.Dependencies[0].Version != "" {
+		if !version.IsCompatibleRange(req.Dependencies[0].Version, aliasChart.Metadata.Version) {
+			t.Fatalf("Dependency chart version is not in the compatible range")
+		}
+
+	}
+
+	// Failure case
+	req.Dependencies[0].Name = "something-else"
+	if aliasChart := getAliasDependency(c.Dependencies, req.Dependencies[0]); aliasChart != nil {
+		t.Fatalf("expected no chart but got %s", aliasChart.Metadata.Name)
+	}
+
+	req.Dependencies[0].Version = "something else which is not in the compatible range"
+	if version.IsCompatibleRange(req.Dependencies[0].Version, aliasChart.Metadata.Version) {
+		t.Fatalf("Dependency chart version which is not in the compatible range should cause a failure other than a success ")
+	}
+
+}
+
+func TestDependentChartAliases(t *testing.T) {
+	c, err := Load("testdata/dependent-chart-alias")
+	if err != nil {
+		t.Fatalf("Failed to load testdata: %s", err)
+	}
+
+	if len(c.Dependencies) == 0 {
+		t.Fatal("There are no dependencies to run this test")
+	}
+
+	origLength := len(c.Dependencies)
+	if err := ProcessRequirementsEnabled(c, c.Values); err != nil {
+		t.Fatalf("Expected no errors but got %q", err)
+	}
+
+	if len(c.Dependencies) == origLength {
+		t.Fatal("Expected alias dependencies to be added, but did not got that")
+	}
+
+	reqmts, err := LoadRequirements(c)
+	if err != nil {
+		t.Fatalf("Cannot load requirements for test chart, %v", err)
+	}
+
+	if len(c.Dependencies) != len(reqmts.Dependencies) {
+		t.Fatalf("Expected number of chart dependencies %d, but got %d", len(reqmts.Dependencies), len(c.Dependencies))
+	}
+
+}
+
+func TestDependentChartWithSubChartsAbsentInRequirements(t *testing.T) {
+	c, err := Load("testdata/dependent-chart-no-requirements-yaml")
+	if err != nil {
+		t.Fatalf("Failed to load testdata: %s", err)
+	}
+
+	if len(c.Dependencies) != 2 {
+		t.Fatalf("Expected 2 dependencies for this chart, but got %d", len(c.Dependencies))
+	}
+
+	origLength := len(c.Dependencies)
+	if err := ProcessRequirementsEnabled(c, c.Values); err != nil {
+		t.Fatalf("Expected no errors but got %q", err)
+	}
+
+	if len(c.Dependencies) != origLength {
+		t.Fatal("Expected no changes in dependencies to be, but did something got changed")
+	}
+
+}
+
+func TestDependentChartWithSubChartsHelmignore(t *testing.T) {
+	if _, err := Load("testdata/dependent-chart-helmignore"); err != nil {
+		t.Fatalf("Failed to load testdata: %s", err)
+	}
+}
+
+func TestDependentChartsWithSubChartsSymlink(t *testing.T) {
+	joonix := "testdata/joonix"
+	if err := os.Symlink(filepath.Join("..", "..", "frobnitz"), filepath.Join(joonix, "charts", "frobnitz")); err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(filepath.Join(joonix, "charts", "frobnitz"))
+	c, err := Load(joonix)
+	if err != nil {
+		t.Fatalf("Failed to load testdata: %s", err)
+	}
+	if c.Metadata.Name != "joonix" {
+		t.Fatalf("Unexpected chart name: %s", c.Metadata.Name)
+	}
+	if n := len(c.Dependencies); n != 1 {
+		t.Fatalf("Expected 1 dependency for this chart, but got %d", n)
+	}
+}
+
+func TestDependentChartsWithSubchartsAllSpecifiedInRequirements(t *testing.T) {
+	c, err := Load("testdata/dependent-chart-with-all-in-requirements-yaml")
+	if err != nil {
+		t.Fatalf("Failed to load testdata: %s", err)
+	}
+
+	if len(c.Dependencies) == 0 {
+		t.Fatal("There are no dependencies to run this test")
+	}
+
+	origLength := len(c.Dependencies)
+	if err := ProcessRequirementsEnabled(c, c.Values); err != nil {
+		t.Fatalf("Expected no errors but got %q", err)
+	}
+
+	if len(c.Dependencies) != origLength {
+		t.Fatal("Expected no changes in dependencies to be, but did something got changed")
+	}
+
+	reqmts, err := LoadRequirements(c)
+	if err != nil {
+		t.Fatalf("Cannot load requirements for test chart, %v", err)
+	}
+
+	if len(c.Dependencies) != len(reqmts.Dependencies) {
+		t.Fatalf("Expected number of chart dependencies %d, but got %d", len(reqmts.Dependencies), len(c.Dependencies))
+	}
+
+}
+
+func TestDependentChartsWithSomeSubchartsSpecifiedInRequirements(t *testing.T) {
+	c, err := Load("testdata/dependent-chart-with-mixed-requirements-yaml")
+	if err != nil {
+		t.Fatalf("Failed to load testdata: %s", err)
+	}
+
+	if len(c.Dependencies) == 0 {
+		t.Fatal("There are no dependencies to run this test")
+	}
+
+	origLength := len(c.Dependencies)
+	if err := ProcessRequirementsEnabled(c, c.Values); err != nil {
+		t.Fatalf("Expected no errors but got %q", err)
+	}
+
+	if len(c.Dependencies) != origLength {
+		t.Fatal("Expected no changes in dependencies to be, but did something got changed")
+	}
+
+	reqmts, err := LoadRequirements(c)
+	if err != nil {
+		t.Fatalf("Cannot load requirements for test chart, %v", err)
+	}
+
+	if len(c.Dependencies) <= len(reqmts.Dependencies) {
+		t.Fatalf("Expected more dependencies than specified in requirements.yaml(%d), but got %d", len(reqmts.Dependencies), len(c.Dependencies))
+	}
+
 }

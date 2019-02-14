@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,7 +20,10 @@ import (
 	"sort"
 	"strconv"
 
+	"github.com/golang/protobuf/proto"
+
 	rspb "k8s.io/helm/pkg/proto/hapi/release"
+	storageerrors "k8s.io/helm/pkg/storage/errors"
 )
 
 // records holds a list of in-memory release records
@@ -36,7 +39,7 @@ func (rs *records) Add(r *record) error {
 	}
 
 	if rs.Exists(r.key) {
-		return ErrReleaseExists
+		return storageerrors.ErrReleaseExists(r.key)
 	}
 
 	*rs = append(*rs, r)
@@ -129,5 +132,5 @@ func newRecord(key string, rls *rspb.Release) *record {
 	lbs.set("STATUS", rspb.Status_Code_name[int32(rls.Info.Status.Code)])
 	lbs.set("VERSION", strconv.Itoa(int(rls.Version)))
 
-	return &record{key: key, lbs: lbs, rls: rls}
+	return &record{key: key, lbs: lbs, rls: proto.Clone(rls).(*rspb.Release)}
 }

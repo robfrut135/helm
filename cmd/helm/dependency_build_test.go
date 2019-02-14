@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -29,18 +29,19 @@ import (
 )
 
 func TestDependencyBuildCmd(t *testing.T) {
-	oldhome := helmHome
 	hh, err := tempHelmHome(t)
 	if err != nil {
 		t.Fatal(err)
 	}
-	helmHome = hh
+	cleanup := resetEnv()
 	defer func() {
-		os.RemoveAll(hh)
-		helmHome = oldhome
+		os.RemoveAll(hh.String())
+		cleanup()
 	}()
 
-	srv := repotest.NewServer(hh)
+	settings.Home = hh
+
+	srv := repotest.NewServer(hh.String())
 	defer srv.Stop()
 	_, err = srv.CopyCharts("testdata/testcharts/*.tgz")
 	if err != nil {
@@ -48,14 +49,14 @@ func TestDependencyBuildCmd(t *testing.T) {
 	}
 
 	chartname := "depbuild"
-	if err := createTestingChart(hh, chartname, srv.URL()); err != nil {
+	if err := createTestingChart(hh.String(), chartname, srv.URL()); err != nil {
 		t.Fatal(err)
 	}
 
 	out := bytes.NewBuffer(nil)
 	dbc := &dependencyBuildCmd{out: out}
 	dbc.helmhome = helmpath.Home(hh)
-	dbc.chartpath = filepath.Join(hh, chartname)
+	dbc.chartpath = filepath.Join(hh.String(), chartname)
 
 	// In the first pass, we basically want the same results as an update.
 	if err := dbc.run(); err != nil {
@@ -70,14 +71,14 @@ func TestDependencyBuildCmd(t *testing.T) {
 	}
 
 	// Make sure the actual file got downloaded.
-	expect := filepath.Join(hh, chartname, "charts/reqtest-0.1.0.tgz")
+	expect := filepath.Join(hh.String(), chartname, "charts/reqtest-0.1.0.tgz")
 	if _, err := os.Stat(expect); err != nil {
 		t.Fatal(err)
 	}
 
 	// In the second pass, we want to remove the chart's request dependency,
 	// then see if it restores from the lock.
-	lockfile := filepath.Join(hh, chartname, "requirements.lock")
+	lockfile := filepath.Join(hh.String(), chartname, "requirements.lock")
 	if _, err := os.Stat(lockfile); err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +93,7 @@ func TestDependencyBuildCmd(t *testing.T) {
 	}
 
 	// Now repeat the test that the dependency exists.
-	expect = filepath.Join(hh, chartname, "charts/reqtest-0.1.0.tgz")
+	expect = filepath.Join(hh.String(), chartname, "charts/reqtest-0.1.0.tgz")
 	if _, err := os.Stat(expect); err != nil {
 		t.Fatal(err)
 	}

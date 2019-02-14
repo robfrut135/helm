@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,40 +19,68 @@ package main
 import (
 	"fmt"
 	"io"
-	"io/ioutil"
 	"strings"
 
-	"github.com/ghodss/yaml"
 	"github.com/spf13/cobra"
 
 	"k8s.io/helm/pkg/chartutil"
 	"k8s.io/helm/pkg/helm"
-	"k8s.io/helm/pkg/storage/driver"
-	"k8s.io/helm/pkg/strvals"
+	"k8s.io/helm/pkg/renderutil"
+	storageerrors "k8s.io/helm/pkg/storage/errors"
 )
 
 const upgradeDesc = `
-This command upgrades a release to a new version of a chart.
+This command upgrades a release to a specified version of a chart and/or updates chart values.
 
-The upgrade arguments must be a release and chart. The chart
-argument can be either: a chart reference('stable/mariadb'), a path to a chart directory,
-a packaged chart, or a fully qualified URL. For chart references, the latest
-version will be specified unless the '--version' flag is set.
+Required arguments are release and chart. The chart argument can be one of:
+ - a chart reference('stable/mariadb'); use '--version' and '--devel' flags for versions other than latest,
+ - a path to a chart directory,
+ - a packaged chart,
+ - a fully qualified URL.
 
-To override values in a chart, use either the '--values' flag and pass in a file
-or use the '--set' flag and pass configuration from the command line.
+To customize the chart values, use any of
+ - '--values'/'-f' to pass in a yaml file holding settings,
+ - '--set' to provide one or more key=val pairs directly,
+ - '--set-string' to provide key=val forcing val to be stored as a string,
+ - '--set-file' to provide key=path to read a single large value from a file at path.
 
-You can specify the '--values'/'-f' flag multiple times. The priority will be given to the
-last (right-most) file specified. For example, if both myvalues.yaml and override.yaml
-contained a key called 'Test', the value set in override.yaml would take precedence:
+To edit or append to the existing customized values, add the
+ '--reuse-values' flag, otherwise any existing customized values are ignored.
+
+If no chart value arguments are provided on the command line, any existing customized values are carried
+forward. If you want to revert to just the values provided in the chart, use the '--reset-values' flag.
+
+You can specify any of the chart value flags multiple times. The priority will be given to the last
+(right-most) value specified. For example, if both myvalues.yaml and override.yaml contained a key
+called 'Test', the value set in override.yaml would take precedence:
 
 	$ helm upgrade -f myvalues.yaml -f override.yaml redis ./redis
 
-You can specify the '--set' flag multiple times. The priority will be given to the
-last (right-most) set specified. For example, if both 'bar' and 'newbar' values are
-set for a key called 'foo', the 'newbar' value would take precedence:
+Note that the key name provided to the '--set', '--set-string' and '--set-file' flags can reference
+structure elements. Examples:
+  - mybool=TRUE
+  - livenessProbe.timeoutSeconds=10
+  - metrics.annotations[0]=hey,metrics.annotations[1]=ho
 
-	$ helm upgrade --set foo=bar --set foo=newbar redis ./redis
+which sets the top level key mybool to true, the nested timeoutSeconds to 10, and two array values, respectively.
+
+Note that the value side of the key=val provided to '--set' and '--set-string' flags will pass through
+shell evaluation followed by yaml type parsing to produce the final value. This may alter inputs with
+special characters in unexpected ways, for example
+
+	$ helm upgrade --set pwd=3jk$o2,z=f\30.e redis ./redis
+
+results in "pwd: 3jk" and "z: f30.e". Use single quotes to avoid shell evaluation and argument delimiters,
+and use backslash to escape yaml special characters:
+
+	$ helm upgrade --set pwd='3jk$o2z=f\\30.e' redis ./redis
+
+which results in the expected "pwd: 3jk$o2z=f\30.e". If a single quote occurs in your value then follow
+your shell convention for escaping it; for example in bash:
+
+	$ helm upgrade --set pwd='3jk$o2z=f\\30with'\''quote'
+
+which results in "pwd: 3jk$o2z=f\30with'quote".
 `
 
 type upgradeCmd struct {
@@ -62,9 +90,12 @@ type upgradeCmd struct {
 	client       helm.Interface
 	dryRun       bool
 	recreate     bool
+	force        bool
 	disableHooks bool
 	valueFiles   valueFiles
 	values       []string
+	stringValues []string
+	fileValues   []string
 	verify       bool
 	keyring      string
 	install      bool
@@ -74,6 +105,17 @@ type upgradeCmd struct {
 	resetValues  bool
 	reuseValues  bool
 	wait         bool
+	atomic       bool
+	repoURL      string
+	username     string
+	password     string
+	devel        bool
+	subNotes     bool
+	description  string
+
+	certFile string
+	keyFile  string
+	caFile   string
 }
 
 func newUpgradeCmd(client helm.Interface, out io.Writer) *cobra.Command {
@@ -84,50 +126,75 @@ func newUpgradeCmd(client helm.Interface, out io.Writer) *cobra.Command {
 	}
 
 	cmd := &cobra.Command{
-		Use:               "upgrade [RELEASE] [CHART]",
-		Short:             "upgrade a release",
-		Long:              upgradeDesc,
-		PersistentPreRunE: setupConnection,
+		Use:     "upgrade [RELEASE] [CHART]",
+		Short:   "upgrade a release",
+		Long:    upgradeDesc,
+		PreRunE: func(_ *cobra.Command, _ []string) error { return setupConnection() },
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := checkArgsLength(len(args), "release name", "chart path"); err != nil {
 				return err
 			}
 
+			if upgrade.version == "" && upgrade.devel {
+				debug("setting version to >0.0.0-0")
+				upgrade.version = ">0.0.0-0"
+			}
+
 			upgrade.release = args[0]
 			upgrade.chart = args[1]
 			upgrade.client = ensureHelmClient(upgrade.client)
+			upgrade.wait = upgrade.wait || upgrade.atomic
 
 			return upgrade.run()
 		},
 	}
 
 	f := cmd.Flags()
-	f.VarP(&upgrade.valueFiles, "values", "f", "specify values in a YAML file (can specify multiple)")
+	settings.AddFlagsTLS(f)
+	f.VarP(&upgrade.valueFiles, "values", "f", "specify values in a YAML file or a URL(can specify multiple)")
 	f.BoolVar(&upgrade.dryRun, "dry-run", false, "simulate an upgrade")
 	f.BoolVar(&upgrade.recreate, "recreate-pods", false, "performs pods restart for the resource if applicable")
+	f.BoolVar(&upgrade.force, "force", false, "force resource update through delete/recreate if needed")
 	f.StringArrayVar(&upgrade.values, "set", []string{}, "set values on the command line (can specify multiple or separate values with commas: key1=val1,key2=val2)")
+	f.StringArrayVar(&upgrade.stringValues, "set-string", []string{}, "set STRING values on the command line (can specify multiple or separate values with commas: key1=val1,key2=val2)")
+	f.StringArrayVar(&upgrade.fileValues, "set-file", []string{}, "set values from respective files specified via the command line (can specify multiple or separate values with commas: key1=path1,key2=path2)")
 	f.BoolVar(&upgrade.disableHooks, "disable-hooks", false, "disable pre/post upgrade hooks. DEPRECATED. Use no-hooks")
 	f.BoolVar(&upgrade.disableHooks, "no-hooks", false, "disable pre/post upgrade hooks")
 	f.BoolVar(&upgrade.verify, "verify", false, "verify the provenance of the chart before upgrading")
 	f.StringVar(&upgrade.keyring, "keyring", defaultKeyring(), "path to the keyring that contains public signing keys")
 	f.BoolVarP(&upgrade.install, "install", "i", false, "if a release by this name doesn't already exist, run an install")
-	f.StringVar(&upgrade.namespace, "namespace", "default", "namespace to install the release into (only used if --install is set)")
+	f.StringVar(&upgrade.namespace, "namespace", "", "namespace to install the release into (only used if --install is set). Defaults to the current kube config namespace")
 	f.StringVar(&upgrade.version, "version", "", "specify the exact chart version to use. If this is not specified, the latest version is used")
-	f.Int64Var(&upgrade.timeout, "timeout", 300, "time in seconds to wait for any individual kubernetes operation (like Jobs for hooks)")
+	f.Int64Var(&upgrade.timeout, "timeout", 300, "time in seconds to wait for any individual Kubernetes operation (like Jobs for hooks)")
 	f.BoolVar(&upgrade.resetValues, "reset-values", false, "when upgrading, reset the values to the ones built into the chart")
-	f.BoolVar(&upgrade.reuseValues, "reuse-values", false, "when upgrading, reuse the last release's values, and merge in any new values. If '--reset-values' is specified, this is ignored.")
+	f.BoolVar(&upgrade.reuseValues, "reuse-values", false, "when upgrading, reuse the last release's values and merge in any overrides from the command line via --set and -f. If '--reset-values' is specified, this is ignored.")
 	f.BoolVar(&upgrade.wait, "wait", false, "if set, will wait until all Pods, PVCs, Services, and minimum number of Pods of a Deployment are in a ready state before marking the release as successful. It will wait for as long as --timeout")
+	f.BoolVar(&upgrade.atomic, "atomic", false, "if set, upgrade process rolls back changes made in case of failed upgrade, also sets --wait flag")
+	f.StringVar(&upgrade.repoURL, "repo", "", "chart repository url where to locate the requested chart")
+	f.StringVar(&upgrade.username, "username", "", "chart repository username where to locate the requested chart")
+	f.StringVar(&upgrade.password, "password", "", "chart repository password where to locate the requested chart")
+	f.StringVar(&upgrade.certFile, "cert-file", "", "identify HTTPS client using this SSL certificate file")
+	f.StringVar(&upgrade.keyFile, "key-file", "", "identify HTTPS client using this SSL key file")
+	f.StringVar(&upgrade.caFile, "ca-file", "", "verify certificates of HTTPS-enabled servers using this CA bundle")
+	f.BoolVar(&upgrade.devel, "devel", false, "use development versions, too. Equivalent to version '>0.0.0-0'. If --version is set, this is ignored.")
+	f.BoolVar(&upgrade.subNotes, "render-subchart-notes", false, "render subchart notes along with parent")
+	f.StringVar(&upgrade.description, "description", "", "specify the description to use for the upgrade, rather than the default")
 
 	f.MarkDeprecated("disable-hooks", "use --no-hooks instead")
+
+	// set defaults from environment
+	settings.InitTLS(f)
 
 	return cmd
 }
 
 func (u *upgradeCmd) run() error {
-	chartPath, err := locateChartPath(u.chart, u.version, u.verify, u.keyring)
+	chartPath, err := locateChartPath(u.repoURL, u.username, u.password, u.chart, u.version, u.verify, u.keyring, u.certFile, u.keyFile, u.caFile)
 	if err != nil {
 		return err
 	}
+
+	releaseHistory, err := u.client.ReleaseHistory(u.release, helm.WithMaxHistory(1))
 
 	if u.install {
 		// If a release does not exist, install it. If another error occurs during
@@ -136,8 +203,21 @@ func (u *upgradeCmd) run() error {
 		// The returned error is a grpc.rpcError that wraps the message from the original error.
 		// So we're stuck doing string matching against the wrapped error, which is nested somewhere
 		// inside of the grpc.rpcError message.
-		_, err := u.client.ReleaseHistory(u.release, helm.WithMaxHistory(1))
-		if err != nil && strings.Contains(err.Error(), driver.ErrReleaseNotFound.Error()) {
+
+		if err == nil {
+			if u.namespace == "" {
+				u.namespace = defaultNamespace()
+			}
+			previousReleaseNamespace := releaseHistory.Releases[0].Namespace
+			if previousReleaseNamespace != u.namespace {
+				fmt.Fprintf(u.out,
+					"WARNING: Namespace %q doesn't match with previous. Release will be deployed to %s\n",
+					u.namespace, previousReleaseNamespace,
+				)
+			}
+		}
+
+		if err != nil && strings.Contains(err.Error(), storageerrors.ErrReleaseNotFound(u.release).Error()) {
 			fmt.Fprintf(u.out, "Release %q does not exist. Installing it now.\n", u.release)
 			ic := &installCmd{
 				chartPath:    chartPath,
@@ -150,15 +230,19 @@ func (u *upgradeCmd) run() error {
 				disableHooks: u.disableHooks,
 				keyring:      u.keyring,
 				values:       u.values,
+				stringValues: u.stringValues,
+				fileValues:   u.fileValues,
 				namespace:    u.namespace,
 				timeout:      u.timeout,
 				wait:         u.wait,
+				description:  u.description,
+				atomic:       u.atomic,
 			}
 			return ic.run()
 		}
 	}
 
-	rawVals, err := u.vals()
+	rawVals, err := vals(u.valueFiles, u.values, u.stringValues, u.fileValues, u.certFile, u.keyFile, u.caFile)
 	if err != nil {
 		return err
 	}
@@ -166,8 +250,14 @@ func (u *upgradeCmd) run() error {
 	// Check chart requirements to make sure all dependencies are present in /charts
 	if ch, err := chartutil.Load(chartPath); err == nil {
 		if req, err := chartutil.LoadRequirements(ch); err == nil {
-			checkDependencies(ch, req, u.out)
+			if err := renderutil.CheckDependencies(ch, req); err != nil {
+				return err
+			}
+		} else if err != chartutil.ErrRequirementsNotFound {
+			return fmt.Errorf("cannot load requirements: %v", err)
 		}
+	} else {
+		return prettyError(err)
 	}
 
 	resp, err := u.client.UpdateRelease(
@@ -176,16 +266,38 @@ func (u *upgradeCmd) run() error {
 		helm.UpdateValueOverrides(rawVals),
 		helm.UpgradeDryRun(u.dryRun),
 		helm.UpgradeRecreate(u.recreate),
+		helm.UpgradeForce(u.force),
 		helm.UpgradeDisableHooks(u.disableHooks),
 		helm.UpgradeTimeout(u.timeout),
 		helm.ResetValues(u.resetValues),
 		helm.ReuseValues(u.reuseValues),
-		helm.UpgradeWait(u.wait))
+		helm.UpgradeSubNotes(u.subNotes),
+		helm.UpgradeWait(u.wait),
+		helm.UpgradeDescription(u.description))
 	if err != nil {
+		fmt.Fprintf(u.out, "UPGRADE FAILED\nROLLING BACK\nError: %v\n", prettyError(err))
+		if u.atomic {
+			rollback := &rollbackCmd{
+				out:          u.out,
+				client:       u.client,
+				name:         u.release,
+				dryRun:       u.dryRun,
+				recreate:     u.recreate,
+				force:        u.force,
+				timeout:      u.timeout,
+				wait:         u.wait,
+				description:  "",
+				revision:     releaseHistory.Releases[0].Version,
+				disableHooks: u.disableHooks,
+			}
+			if err := rollback.run(); err != nil {
+				return err
+			}
+		}
 		return fmt.Errorf("UPGRADE FAILED: %v", prettyError(err))
 	}
 
-	if flagDebug {
+	if settings.Debug {
 		printRelease(u.out, resp.Release)
 	}
 
@@ -199,32 +311,4 @@ func (u *upgradeCmd) run() error {
 	PrintStatus(u.out, status)
 
 	return nil
-}
-
-func (u *upgradeCmd) vals() ([]byte, error) {
-	base := map[string]interface{}{}
-
-	// User specified a values files via -f/--values
-	for _, filePath := range u.valueFiles {
-		currentMap := map[string]interface{}{}
-		bytes, err := ioutil.ReadFile(filePath)
-		if err != nil {
-			return []byte{}, err
-		}
-
-		if err := yaml.Unmarshal(bytes, &currentMap); err != nil {
-			return []byte{}, fmt.Errorf("failed to parse %s: %s", filePath, err)
-		}
-		// Merge with the previous map
-		base = mergeValues(base, currentMap)
-	}
-
-	// User specified a value via --set
-	for _, value := range u.values {
-		if err := strvals.ParseInto(value, base); err != nil {
-			return []byte{}, fmt.Errorf("failed parsing --set data: %s", err)
-		}
-	}
-
-	return yaml.Marshal(base)
 }

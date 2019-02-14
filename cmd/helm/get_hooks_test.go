@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,10 +17,14 @@ limitations under the License.
 package main
 
 import (
+	"fmt"
 	"io"
 	"testing"
 
 	"github.com/spf13/cobra"
+
+	"k8s.io/helm/pkg/helm"
+	"k8s.io/helm/pkg/proto/hapi/release"
 )
 
 func TestGetHooks(t *testing.T) {
@@ -28,8 +32,9 @@ func TestGetHooks(t *testing.T) {
 		{
 			name:     "get hooks with release",
 			args:     []string{"aeneas"},
-			expected: mockHookTemplate,
-			resp:     releaseMock(&releaseOptions{name: "aeneas"}),
+			expected: fmt.Sprintf("---\n# %s\n%s\n", "pre-install-hook", helm.MockHookTemplate),
+			resp:     helm.ReleaseMock(&helm.MockReleaseOptions{Name: "aeneas"}),
+			rels:     []*release.Release{helm.ReleaseMock(&helm.MockReleaseOptions{Name: "aeneas"})},
 		},
 		{
 			name: "get hooks without args",
@@ -37,7 +42,7 @@ func TestGetHooks(t *testing.T) {
 			err:  true,
 		},
 	}
-	runReleaseCases(t, tests, func(c *fakeReleaseClient, out io.Writer) *cobra.Command {
+	runReleaseCases(t, tests, func(c *helm.FakeClient, out io.Writer) *cobra.Command {
 		return newGetHooksCmd(c, out)
 	})
 }

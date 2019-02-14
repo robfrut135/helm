@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,15 +20,16 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"testing"
 	"text/template"
 
 	"github.com/golang/protobuf/ptypes/any"
 
+	kversion "k8s.io/apimachinery/pkg/version"
 	"k8s.io/helm/pkg/proto/hapi/chart"
 	"k8s.io/helm/pkg/timeconv"
 	"k8s.io/helm/pkg/version"
-	kversion "k8s.io/kubernetes/pkg/version"
 )
 
 func TestReadValues(t *testing.T) {
@@ -275,8 +276,14 @@ func ttpl(tpl string, v map[string]interface{}) (string, error) {
 	return b.String(), nil
 }
 
+// ref: http://www.yaml.org/spec/1.2/spec.html#id2803362
 var testCoalesceValuesYaml = `
 top: yup
+bottom: null
+right: Null
+left: NULL
+front: ~
+back: ""
 
 global:
   name: Ishmael
@@ -316,6 +323,7 @@ func TestCoalesceValues(t *testing.T) {
 		expect string
 	}{
 		{"{{.top}}", "yup"},
+		{"{{.back}}", ""},
 		{"{{.name}}", "moby"},
 		{"{{.global.name}}", "Ishmael"},
 		{"{{.global.subject}}", "Queequeg"},
@@ -341,6 +349,13 @@ func TestCoalesceValues(t *testing.T) {
 	for _, tt := range tests {
 		if o, err := ttpl(tt.tpl, v); err != nil || o != tt.expect {
 			t.Errorf("Expected %q to expand to %q, got %q", tt.tpl, tt.expect, o)
+		}
+	}
+
+	nullKeys := []string{"bottom", "right", "left", "front"}
+	for _, nullKey := range nullKeys {
+		if _, ok := v[nullKey]; ok {
+			t.Errorf("Expected key %q to be removed, still present", nullKey)
 		}
 	}
 }
@@ -371,7 +386,7 @@ func TestCoalesceTables(t *testing.T) {
 
 	// What we expect is that anything in dst overrides anything in src, but that
 	// otherwise the values are coalesced.
-	coalesceTables(dst, src)
+	coalesceTables(dst, src, "")
 
 	if dst["name"] != "Ishmael" {
 		t.Errorf("Unexpected name: %s", dst["name"])
@@ -434,10 +449,93 @@ chapter:
 	if _, err := d.PathValue("chapter.doesntexist.one"); err == nil {
 		t.Errorf("Non-existent key in middle of path should return error: %s\n%v", err, d)
 	}
+	if _, err := d.PathValue(""); err == nil {
+		t.Error("Asking for the value from an empty path should yield an error")
+	}
 	if v, err := d.PathValue("title"); err == nil {
 		if v != "Moby Dick" {
 			t.Errorf("Failed to return values for root key title")
 		}
 	}
+}
 
+func TestValuesMergeInto(t *testing.T) {
+	testCases := map[string]struct {
+		destination string
+		source      string
+		result      string
+	}{
+		"maps are merged": {
+			`
+resources:
+ requests:
+   cpu: 400m
+ something: else
+`,
+			`
+resources:
+ requests:
+   cpu: 500m
+`,
+			`
+resources:
+ requests:
+   cpu: 500m
+ something: else
+`,
+		},
+		"values are replaced": {
+			`
+firstKey: firstValue
+secondKey: secondValue
+thirdKey: thirdValue
+`,
+			`
+firstKey: newFirstValue
+thirdKey: newThirdValue
+`,
+			`
+firstKey: newFirstValue
+secondKey: secondValue
+thirdKey: newThirdValue
+`,
+		},
+		"new values are added": {
+			`
+existingKey: existingValue
+`,
+			`
+newKey: newValue
+anotherNewKey:
+  nestedNewKey: nestedNewValue
+`,
+			`
+existingKey: existingValue
+newKey: newValue
+anotherNewKey:
+  nestedNewKey: nestedNewValue
+`,
+		},
+	}
+
+	for name, tc := range testCases {
+		d, err := ReadValues([]byte(tc.destination))
+		if err != nil {
+			t.Error(err)
+		}
+		s, err := ReadValues([]byte(tc.source))
+		if err != nil {
+			t.Error(err)
+		}
+		expectedRes, err := ReadValues([]byte(tc.result))
+		if err != nil {
+			t.Error(err)
+		}
+
+		d.MergeInto(s)
+
+		if !reflect.DeepEqual(expectedRes, d) {
+			t.Errorf("%s: Expected %v, but got %v", name, expectedRes, d)
+		}
+	}
 }

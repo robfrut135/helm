@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,18 +17,17 @@ limitations under the License.
 package driver // import "k8s.io/helm/pkg/storage/driver"
 
 import (
-	"errors"
-
 	rspb "k8s.io/helm/pkg/proto/hapi/release"
+	storageerrors "k8s.io/helm/pkg/storage/errors"
 )
 
 var (
-	// ErrReleaseNotFound indicates that a release is not found.
-	ErrReleaseNotFound = errors.New("release: not found")
-	// ErrReleaseExists indicates that a release already exists.
-	ErrReleaseExists = errors.New("release: already exists")
-	// ErrInvalidKey indicates that a release key could not be parsed.
-	ErrInvalidKey = errors.New("release: invalid key")
+	// ErrReleaseNotFound has been deprecated; please use storageerrors.ErrReleaseNotFound instead.
+	ErrReleaseNotFound = storageerrors.ErrReleaseNotFound
+	// ErrReleaseExists has been deprecated; please use storageerrors.ErrReleaseExists instead.
+	ErrReleaseExists = storageerrors.ErrReleaseExists
+	// ErrInvalidKey has been deprecated; please use storageerrors.ErrInvalidKey instead.
+	ErrInvalidKey = storageerrors.ErrInvalidKey
 )
 
 // Creator is the interface that wraps the Create method.
@@ -69,9 +68,9 @@ type Queryor interface {
 	Query(labels map[string]string) ([]*rspb.Release, error)
 }
 
-// Driver is the interface composed of Creator, Updator, Deletor, Queryor
+// Driver is the interface composed of Creator, Updator, Deletor, and Queryor
 // interfaces. It defines the behavior for storing, updating, deleted,
-// and retrieving tiller releases from some underlying storage mechanism,
+// and retrieving Tiller releases from some underlying storage mechanism,
 // e.g. memory, configmaps.
 type Driver interface {
 	Creator
